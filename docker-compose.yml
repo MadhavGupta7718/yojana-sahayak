@@ -1,0 +1,96 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-yojana}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-yojana_secure_change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-yojana_sahayak}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-yojana} -d ${POSTGRES_DB:-yojana_sahayak}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-yojana}:${POSTGRES_PASSWORD:-yojana_secure_change_me}@db:5432/${POSTGRES_DB:-yojana_sahayak}
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app/backend
+      - ./scraper:/app/scraper
+      - ./ml:/app/ml
+      - ./database:/app/database
+      - uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "cd /app/backend && alembic upgrade head &&
+             python -m app.seed &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  scraper:
+    build:
+      context: .
+      dockerfile: scraper/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-yojana}:${POSTGRES_PASSWORD:-yojana_secure_change_me}@db:5432/${POSTGRES_DB:-yojana_sahayak}
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./backend:/app/backend
+      - ./scraper:/app/scraper
+      - ./ml:/app/ml
+      - ./database:/app/database
+      - uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    command: >
+      sh -c "cd /app && python -m scraper.scheduler.worker"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      BACKEND_INTERNAL_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+    command: npm run dev
+
+volumes:
+  pgdata:
+  uploads:
