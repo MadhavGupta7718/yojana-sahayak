@@ -4,6 +4,51 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+PURPOSE_FAMILIES = {
+    "business": {
+        "business",
+        "self-employment",
+        "self employment",
+        "selfemployment",
+        "agriculture",
+        "enterprise",
+        "micro",
+        "term_loan",
+        "micro_finance",
+    },
+    "education": {
+        "education",
+        "educational",
+        "educational_loan",
+        "study",
+        "studies",
+    },
+}
+
+
+def normalize_purpose(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("_", " ").replace("-", " ")
+    text = " ".join(text.split())
+    compact = text.replace(" ", "")
+    for family, aliases in PURPOSE_FAMILIES.items():
+        normalized_aliases = {a.replace("_", " ").replace("-", " ") for a in aliases}
+        compact_aliases = {a.replace(" ", "").replace("_", "").replace("-", "") for a in aliases}
+        if text in normalized_aliases or compact in compact_aliases:
+            return family
+    if any(a in text for a in ("education", "educational", "study")):
+        return "education"
+    if any(a in text for a in ("business", "self employment", "agriculture", "enterprise", "micro", "term loan")):
+        return "business"
+    return text
+
+
+def purpose_compatible(user_purpose: Any, scheme_purpose: Any) -> bool:
+    u = normalize_purpose(user_purpose)
+    s = normalize_purpose(scheme_purpose)
+    if not u or not s:
+        return False
+    return u == s
+
 
 def _get_profile_value(profile: dict[str, Any], rule_type: str) -> Any:
     mapping = {
@@ -49,7 +94,7 @@ def evaluate_rule(rule: Any, profile: dict[str, Any]) -> dict[str, Any]:
             reason = description or f"Your {rule_type} matches the published condition."
             symbol = "pass"
         else:
-            reason = description or f"Your {rule_type} does not meet the published condition."
+            reason = f"Your {rule_type} does not meet the published condition."
             symbol = "fail"
 
     return {
@@ -83,11 +128,12 @@ def _compare(actual: Any, operator: str, expected: Any) -> bool:
         return str(actual).strip().lower() in {str(v).strip().lower() for v in values}
     if op == "contains":
         return str(expected).strip().lower() in str(actual).strip().lower()
+    if op == "purpose_match":
+        return purpose_compatible(actual, expected)
     if op == "between":
         low, high = expected[0], expected[1]
         return float(low) <= float(actual) <= float(high)
     if op == "intersects":
-        # actual list or string vs expected list
         actual_set = {str(actual).lower()} if not isinstance(actual, list) else {str(a).lower() for a in actual}
         expected_set = {str(e).lower() for e in (expected if isinstance(expected, list) else [expected])}
         return bool(actual_set & expected_set)

@@ -39,8 +39,8 @@ export default async function SchemesPage() {
               </span>
             </div>
             {s.source_url && (
-              <a className="mt-3 inline-block text-[var(--navy)] underline" href={s.source_url} target="_blank" rel="noreferrer">
-                {t(messages, "officialSource")}
+              <a className="source-link" href={s.source_url} target="_blank" rel="noreferrer">
+                {t(messages, "officialSource")} — verify on official website
               </a>
             )}
           </article>

@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "leaflet": "^1.9.4",
     "lucide-react": "^0.469.0",
     "next": "^15.5.9",
     "next-intl": "^4.1.0",
@@ -16,9 +17,11 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@types/leaflet": "^1.9.22",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "autoprefixer": "^10.5.6",
     "eslint-config-next": "15.1.0",
     "postcss": "^8",
     "tailwindcss": "^3.4.1",

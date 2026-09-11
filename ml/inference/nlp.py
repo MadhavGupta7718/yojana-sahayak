@@ -16,32 +16,35 @@ AMOUNT_PATTERNS = [
 PURPOSE_KEYWORDS = {
     "business": [
         "business", "vyapar", "vyapaar", "व्यवसाय", "उद्यम", "enterprise", "self employment",
-        "self-employment", "स्वरोजगार", "dukaan", "shop",
+        "self-employment", "स्वरोजगार", "dukaan", "shop", "startup", "workshop", "factory",
+        "नौकरी नहीं", "खुद का काम",
     ],
     "education": [
         "education", "educational", "study", "studies", "college", "university", "शिक्षा",
-        "पढ़ाई", "padhai", "shiksha", "tuition",
+        "पढ़ाई", "padhai", "shiksha", "tuition", "mba", "btech", "degree",
     ],
     "agriculture": [
         "agriculture", "farming", "dairy", "डेयरी", "कृषि", "kheti", "poultry", "goatery",
-        "animal husbandry", "पशुपालन",
+        "animal husbandry", "पशुपालन", "मछली", "fishery",
     ],
 }
 
 PROJECT_KEYWORDS = {
-    "dairy": ["dairy", "डेयरी", "milk", "दूध", "gaushala"],
-    "tailoring": ["tailoring", "silai", "सिलाई", "boutique"],
-    "kirana": ["kirana", "grocery", "किराना"],
-    "transport": ["transport", "vehicle", "auto", "taxi", "परिवहन"],
-    "education_loan": ["education loan", "शैक्षणिक ऋण", "tuition fee"],
-    "micro_enterprise": ["micro", "microfinance", "सूक्ष्म", "small business"],
+    "dairy": ["dairy", "डेयरी", "milk", "दूध", "gaushala", "cattle", "buffalo"],
+    "tailoring": ["tailoring", "silai", "सिलाई", "boutique", "garment"],
+    "kirana": ["kirana", "grocery", "किराना", "general store"],
+    "transport": ["transport", "vehicle", "auto", "taxi", "परिवहन", "truck"],
+    "education_loan": ["education loan", "शैक्षणिक ऋण", "tuition fee", "hostel fee"],
+    "micro_enterprise": ["micro", "microfinance", "सूक्ष्म", "small business", "chhote business"],
+    "beauty_parlour": ["beauty", "parlour", "salon", "पार्लर"],
 }
 
 CATEGORY_KEYWORDS = {
     "SC": ["sc", "scheduled caste", "अनुसूचित जाति", "anusuchit jati", "dalit"],
-    "ST": ["st", "scheduled tribe", "अनुसूचित जनजाति"],
-    "OBC": ["obc", "other backward", "अन्य पिछड़ा"],
+    "ST": ["st", "scheduled tribe", "अनुसूचित जनजाति", "adivasi"],
+    "OBC": ["obc", "other backward", "अन्य पिछड़ा", "pichda"],
 }
+
 
 HINGLISH_MAP = {
     "mujhe": "",
@@ -102,9 +105,13 @@ def parse_intent(text: str) -> dict[str, Any]:
     loan_required = normalize_amount(original)
 
     age = None
-    age_m = re.search(r"(?:age|उम्र|vayu|umra)\D{0,6}(\d{1,2})", lower)
+    age_m = re.search(
+        r"(?:age|उम्र|vayu|umra|years?\s*old|साल\s*का|वर्षीय)\D{0,8}(\d{1,2})"
+        r"|(?:i\s*am|i'm|mein|main|मेरी?\s*उम्र)\D{0,8}(\d{1,2})",
+        lower,
+    )
     if age_m:
-        age = int(age_m.group(1))
+        age = int(next(g for g in age_m.groups() if g))
 
     income = None
     income_m = re.search(
@@ -114,6 +121,12 @@ def parse_intent(text: str) -> dict[str, Any]:
     )
     if income_m:
         income = normalize_amount(income_m.group(1))
+
+    # Map agriculture-related intents to business purpose for the citizen form options
+    if purpose == "agriculture":
+        purpose = "business"
+        if project_type is None:
+            project_type = "agriculture"
 
     fields = {
         "loan_required": loan_required,

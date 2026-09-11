@@ -149,22 +149,49 @@ def emi(body: EMIRequest):
 def partners_search(body: PartnerSearchRequest, db: Session = Depends(get_db)):
     if body.latitude is None or body.longitude is None:
         # Manual location without coordinates: filter by state/district when available
+        from sqlalchemy import or_
+
         from app.models import Partner, PartnerSchemeMapping
 
-        q = db.query(Partner).filter(Partner.status.in_(["active", "authorized"]))
-        if body.state:
-            q = q.filter(Partner.state.ilike(f"%{body.state}%"))
-        if body.district:
-            q = q.filter(Partner.district.ilike(f"%{body.district}%"))
         mappings = (
             db.query(PartnerSchemeMapping)
             .filter(PartnerSchemeMapping.scheme_id == body.scheme_id)
             .all()
         )
         mapped_ids = {m.partner_id for m in mappings}
+
+        q = db.query(Partner).filter(Partner.status.in_(["active", "authorized"]))
+        if body.state:
+            q = q.filter(Partner.state.ilike(f"%{body.state}%"))
+        if body.district:
+            q = q.filter(Partner.district.ilike(f"%{body.district}%"))
         partners = q.all()
-        if mapped_ids:
-            partners = [p for p in partners if p.id in mapped_ids]
+
+        # If regional partners are not yet published with state metadata, show national listings
+        fallback_note = None
+        if not partners:
+            national = (
+                db.query(Partner)
+                .filter(Partner.status.in_(["active", "authorized"]))
+                .filter(or_(Partner.state.is_(None), Partner.state == ""))
+                .all()
+            )
+            if mapped_ids:
+                national = [p for p in national if p.id in mapped_ids] or national
+            partners = national
+            if partners:
+                fallback_note = (
+                    "No partners with matching state/district were found in the verified dataset. "
+                    "Showing national channel-partner listings from the official source. "
+                    "Use automatic location when partner coordinates are available for map search."
+                )
+
+        if mapped_ids and body.state:
+            # Prefer mapped partners when regional filter returned results
+            mapped_only = [p for p in partners if p.id in mapped_ids]
+            if mapped_only:
+                partners = mapped_only
+
         return {
             "scheme_id": body.scheme_id,
             "mode": "manual_region",
@@ -177,14 +204,18 @@ def partners_search(body: PartnerSearchRequest, db: Session = Depends(get_db)):
                     "state": p.state,
                     "district": p.district,
                     "address": p.address,
+                    "latitude": p.latitude,
+                    "longitude": p.longitude,
                     "phone": p.phone,
                     "source_url": p.source_url,
                     "last_verified": p.last_verified,
                     "freshness": freshness_state(p.last_verified),
                     "distance_km": None,
                     "reasons": [
-                        "Matched by state/district (coordinates not provided)",
-                        "Supports scheme" if p.id in mapped_ids or not mapped_ids else "Listed partner",
+                        "Matched by state/district"
+                        if (body.state and p.state)
+                        else "National channel partner listing (state not published in source extract)",
+                        "Supports recommended scheme" if p.id in mapped_ids or not mapped_ids else "Listed partner",
                     ],
                     "score": 50,
                     "partner_operational_status": {
@@ -194,7 +225,7 @@ def partners_search(body: PartnerSearchRequest, db: Session = Depends(get_db)):
                 }
                 for p in partners
             ],
-            "message": None
+            "message": fallback_note
             if partners
             else "No partners found for the given location details. Try another district/state or use current location if coordinates are available.",
             "privacy_note": "Location is used only to find nearby eligible channel partners.",

@@ -83,6 +83,25 @@ def test_eligible_user():
     assert eligible is True
 
 
+def test_education_purpose_blocked_for_business_scheme():
+    from app.rules.engine import purpose_compatible
+
+    assert purpose_compatible("business", "education") is False
+    assert purpose_compatible("self-employment", "business") is True
+    rules = _rules_from_scheme(DummyScheme())
+    profile = {
+        "annual_family_income": 200000,
+        "loan_required": 100000,
+        "category": "SC",
+        "purpose": "education",
+    }
+    results = [evaluate_rule(r, profile) for r in rules]
+    eligible, _ = is_eligible(results)
+    assert eligible is False
+    purpose_fail = next(r for r in results if r["rule_type"] == "purpose")
+    assert purpose_fail["passed"] is False
+
+
 def test_discovery_rejects_blog():
     assert is_government_domain("https://random-loan-blog.com/nsfdc") is False
     prop = propose_source("https://example.com/loan", "NSFDC loans")

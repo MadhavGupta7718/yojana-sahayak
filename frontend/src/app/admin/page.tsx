@@ -120,12 +120,28 @@ export default function AdminPage() {
 
   if (!token) {
     return (
-      <div className="mx-auto max-w-md px-4 py-16">
-        <h1 className="font-display text-3xl text-[var(--navy)]">Admin Login</h1>
-        <form onSubmit={login} className="panel mt-6 space-y-3">
-          <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Username" />
-          <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" />
-          {error && <p className="text-red-600">{error}</p>}
+      <div className="page-wrap" style={{ maxWidth: "28rem" }}>
+        <h1 className="text-navy font-display">Admin Login</h1>
+        <p className="mt-2 text-sm text-muted">
+          Default local credentials (from .env): username <strong>admin</strong>, password{" "}
+          <strong>Admin@ChangeMe123</strong>. Change these before any public deployment.
+        </p>
+        <form onSubmit={login} className="panel mt-6 stack">
+          <div>
+            <label className="label">Username</label>
+            <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} required />
+          </div>
+          <div>
+            <label className="label">Password</label>
+            <input
+              className="input"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
+          </div>
+          {error && <p className="error-box">{error}</p>}
           <button className="btn btn-primary w-full" type="submit">
             Sign in
           </button>
@@ -202,7 +218,7 @@ export default function AdminPage() {
           {changes.map((c) => (
             <div key={c.id} className="panel">
               <div className="font-semibold">
-                {c.entity_type} / {c.field_name} {c.is_conflict ? "⚠ Conflict" : ""}
+                {c.entity_type} / {c.field_name} {c.is_conflict ? "Conflict" : ""}
               </div>
               <div className="mt-1 text-sm">
                 Old: {JSON.stringify(c.old_value)} → New: {JSON.stringify(c.new_value)}

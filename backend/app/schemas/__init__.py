@@ -5,19 +5,19 @@ from pydantic import BaseModel, Field
 
 
 class ProfileInput(BaseModel):
-    age: Optional[int] = Field(None, ge=1, le=120)
-    category: Optional[str] = None
-    annual_family_income: Optional[float] = Field(None, ge=0)
+    age: int = Field(..., ge=18, le=100)
+    category: str = Field(..., min_length=1)
+    annual_family_income: float = Field(..., ge=0)
     occupation: Optional[str] = None
     education_status: Optional[str] = None
-    project_type: Optional[str] = None
-    project_cost: Optional[float] = Field(None, ge=0)
-    loan_required: Optional[float] = Field(None, ge=0)
-    purpose: Optional[str] = None
+    project_type: str = Field(..., min_length=1)
+    project_cost: float = Field(..., gt=0)
+    loan_required: float = Field(..., gt=0)
+    purpose: str = Field(..., min_length=1)
     location: Optional[str] = None
-    state: Optional[str] = None
-    district: Optional[str] = None
-    existing_loan: Optional[bool] = None
+    state: str = Field(..., min_length=1)
+    district: str = Field(..., min_length=1)
+    existing_loan: bool = False
     session_id: Optional[str] = None
 
 

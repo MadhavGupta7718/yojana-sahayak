@@ -24,36 +24,28 @@ export function SiteHeader({
   }
 
   return (
-    <header className="sticky top-0 z-40 border-b border-[var(--border)] bg-[var(--surface)]/95 backdrop-blur">
-      <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3">
-        <Link href="/" className="font-display text-xl font-bold tracking-tight text-[var(--navy)]">
+    <header className="site-header">
+      <div className="site-header__inner">
+        <Link href="/" className="site-header__brand">
           {messages.brand}
         </Link>
-        <nav className="flex flex-wrap items-center gap-3 text-sm font-medium text-[var(--ink)]">
-          <Link href="/" className="hover:text-[var(--saffron)]">
-            {messages.navHome}
-          </Link>
-          <Link href="/find" className="hover:text-[var(--saffron)]">
-            {messages.navFind}
-          </Link>
-          <Link href="/schemes" className="hover:text-[var(--saffron)]">
-            {messages.navExplore}
-          </Link>
-          <Link href="/admin" className="hover:text-[var(--saffron)]">
-            {messages.navAdmin}
-          </Link>
-          <div className="ml-2 flex overflow-hidden rounded-md border border-[var(--border)]">
+        <nav className="site-header__nav" aria-label="Main">
+          <Link href="/">{messages.navHome}</Link>
+          <Link href="/find">{messages.navFind}</Link>
+          <Link href="/schemes">{messages.navExplore}</Link>
+          <Link href="/admin">{messages.navAdmin}</Link>
+          <div className="lang-switch" role="group" aria-label="Language">
             <button
               type="button"
               onClick={() => switchLang("en")}
-              className={`px-2 py-1 ${lang === "en" ? "bg-[var(--navy)] text-white" : "bg-white"}`}
+              className={lang === "en" ? "is-active" : ""}
             >
               English
             </button>
             <button
               type="button"
               onClick={() => switchLang("hi")}
-              className={`px-2 py-1 ${lang === "hi" ? "bg-[var(--navy)] text-white" : "bg-white"}`}
+              className={lang === "hi" ? "is-active" : ""}
             >
               हिन्दी
             </button>
