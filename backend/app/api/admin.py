@@ -26,6 +26,8 @@ from app.services.auth import (
 )
 from scraper.manual_upload import ingest_upload
 from scraper.spiders.http_crawler import SourceCrawler
+from scraper.validators.crawlability import probe_crawlability
+from app.config import get_settings
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -118,28 +120,245 @@ def update_source(
     return {"ok": True}
 
 
+@router.post("/sources/{source_id}/crawl-check")
+def crawl_check(
+    source_id: int,
+    db: Session = Depends(get_db),
+    admin: AdminUser = Depends(require_roles("superadmin", "reviewer")),
+):
+    """Probe robots.txt + homepage before a full crawl."""
+    from datetime import datetime, timezone
+
+    src = db.query(GovernmentSource).filter(GovernmentSource.id == source_id).first()
+    if not src:
+        raise HTTPException(404, "Source not found")
+    settings = get_settings()
+    result = probe_crawlability(src.base_url, settings.crawler_user_agent)
+    src.robots_allowed = result["robots_allowed"]
+    src.last_checked = datetime.now(timezone.utc)
+    # Keep prior notes; append check summary lightly
+    note = f"crawl-check: {result['verdict']} — {result['robots_notes']}"
+    if src.notes and note not in src.notes:
+        src.notes = f"{src.notes} | {note}"
+    elif not src.notes:
+        src.notes = note
+    if result["verdict"] == "blocked":
+        src.status = "MANUAL/RESTRICTED"
+    elif result["verdict"] == "allowed":
+        src.status = "ACTIVE"
+    else:
+        src.status = "WARNING"
+    write_audit(db, admin, "crawl_check", "government_source", source_id, {"verdict": result["verdict"]})
+    db.commit()
+    return {
+        "source_id": source_id,
+        "source_name": src.source_name,
+        "base_url": src.base_url,
+        "crawlability": result,
+    }
+
+
 @router.post("/sources/{source_id}/crawl")
 def trigger_crawl(
     source_id: int,
     db: Session = Depends(get_db),
     admin: AdminUser = Depends(require_roles("superadmin", "reviewer")),
 ):
+    """Probe crawlability, create a queued ScrapingRun, then push work to the scraper."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import and_, or_
+
+    from app.config import get_settings
+
+    # Only auto-close truly abandoned runs (PDF-heavy crawls often exceed 12 minutes).
+    now = datetime.now(timezone.utc)
+    stale_running_cutoff = now - timedelta(minutes=90)
+    stale_queued_cutoff = now - timedelta(minutes=30)
+    stale_runs = (
+        db.query(ScrapingRun)
+        .filter(
+            ScrapingRun.end_time.is_(None),
+            or_(
+                and_(ScrapingRun.status == "running", ScrapingRun.start_time < stale_running_cutoff),
+                and_(ScrapingRun.status == "queued", ScrapingRun.start_time < stale_queued_cutoff),
+            ),
+        )
+        .all()
+    )
+    for run in stale_runs:
+        run.status = "failed"
+        run.end_time = now
+        run.notes = ((run.notes or "") + " | auto-closed stale crawl").strip(" |")
+    if stale_runs:
+        db.commit()
+
     src = db.query(GovernmentSource).filter(GovernmentSource.id == source_id).first()
     if not src:
         raise HTTPException(404, "Source not found")
     if not src.enabled:
-        raise HTTPException(400, "Source is disabled")
-    run = SourceCrawler(db, src).crawl()
-    write_audit(db, admin, "trigger_crawl", "government_source", source_id, {"run_id": run.id})
+        raise HTTPException(400, "Source is disabled. Enable it after review, then crawl.")
+
+    active = (
+        db.query(ScrapingRun)
+        .filter(
+            ScrapingRun.source_id == source_id,
+            ScrapingRun.status.in_(("queued", "running")),
+            ScrapingRun.end_time.is_(None),
+        )
+        .order_by(ScrapingRun.id.desc())
+        .first()
+    )
+    if active:
+        return {
+            "run_id": active.id,
+            "status": active.status,
+            "started": False,
+            "message": f"Crawl already {active.status} for this source (run #{active.id}).",
+            "crawlability": None,
+        }
+
+    other = (
+        db.query(ScrapingRun)
+        .filter(
+            ScrapingRun.status.in_(("queued", "running")),
+            ScrapingRun.end_time.is_(None),
+        )
+        .order_by(ScrapingRun.id.desc())
+        .first()
+    )
+    if other:
+        return {
+            "run_id": other.id,
+            "status": other.status,
+            "started": False,
+            "message": (
+                f"Another crawl is already {other.status} (run #{other.id}, source {other.source_id}). "
+                "Wait for it to finish, or use Clear stuck crawls if it is frozen."
+            ),
+            "crawlability": None,
+        }
+
+    settings = get_settings()
+    crawlability = probe_crawlability(src.base_url, settings.crawler_user_agent)
+    src.robots_allowed = crawlability["robots_allowed"]
+    src.last_checked = now
+    if crawlability["verdict"] == "blocked":
+        src.status = "MANUAL/RESTRICTED"
+        write_audit(
+            db,
+            admin,
+            "trigger_crawl_blocked",
+            "government_source",
+            source_id,
+            {"crawlability": crawlability},
+        )
+        db.commit()
+        return {
+            "status": "blocked",
+            "started": False,
+            "source_id": source_id,
+            "message": crawlability["summary"],
+            "crawlability": crawlability,
+        }
+    if crawlability["verdict"] == "allowed":
+        src.status = "ACTIVE"
+    else:
+        src.status = "WARNING"
+
+    run = ScrapingRun(
+        source_id=source_id,
+        status="queued",
+        notes="queued by admin for scraper worker",
+    )
+    db.add(run)
+    write_audit(
+        db,
+        admin,
+        "trigger_crawl",
+        "government_source",
+        source_id,
+        {"queued": True, "crawlability": crawlability},
+    )
+    db.commit()
+    db.refresh(run)
+
+    try:
+        import redis
+
+        r = redis.from_url(settings.redis_url, decode_responses=True)
+        r.lpush("yojana:crawl_now", f"{source_id}:{run.id}")
+        r.close()
+    except Exception as exc:
+        run.status = "failed"
+        run.end_time = datetime.now(timezone.utc)
+        run.notes = ((run.notes or "") + f" | queue failed: {exc}").strip(" |")
+        db.commit()
+        raise HTTPException(500, f"Could not queue crawl for scraper worker: {exc}") from exc
+
+    prefix = (
+        "Crawlability confirmed. "
+        if crawlability["verdict"] == "allowed"
+        else "Crawlability uncertain — proceeding carefully. "
+    )
     return {
+        "status": "queued",
+        "started": True,
         "run_id": run.id,
-        "status": run.status,
-        "pages_crawled": run.pages_crawled,
-        "documents_processed": run.documents_processed,
-        "changes_detected": run.changes_detected,
-        "error_count": run.error_count,
+        "source_id": source_id,
+        "message": prefix + f"Crawl queued as run #{run.id}. Scraper will pick it up shortly.",
+        "crawlability": crawlability,
     }
 
+
+@router.post("/crawls/clear-stuck")
+def clear_stuck_crawls(
+    db: Session = Depends(get_db),
+    admin: AdminUser = Depends(require_roles("superadmin", "reviewer")),
+):
+    """Mark orphaned queued/running crawls as failed and empty the Redis crawl queue."""
+    from datetime import datetime, timezone
+
+    from app.config import get_settings
+
+    stuck = (
+        db.query(ScrapingRun)
+        .filter(
+            ScrapingRun.status.in_(("queued", "running")),
+            ScrapingRun.end_time.is_(None),
+        )
+        .all()
+    )
+    now = datetime.now(timezone.utc)
+    for run in stuck:
+        run.status = "failed"
+        run.end_time = now
+        run.notes = ((run.notes or "") + " | cleared by admin").strip(" |")
+
+    redis_cleared = 0
+    try:
+        import redis
+
+        settings = get_settings()
+        r = redis.from_url(settings.redis_url, decode_responses=True)
+        redis_cleared = int(r.delete("yojana:crawl_now") or 0)
+        r.close()
+    except Exception:
+        redis_cleared = 0
+
+    write_audit(
+        db,
+        admin,
+        "clear_stuck_crawls",
+        "scraping_run",
+        details={"count": len(stuck), "redis_cleared": redis_cleared},
+    )
+    db.commit()
+    return {
+        "cleared": len(stuck),
+        "run_ids": [r.id for r in stuck],
+        "redis_queue_cleared": bool(redis_cleared),
+    }
 
 @router.get("/changes")
 def list_changes(

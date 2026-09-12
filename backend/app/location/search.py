@@ -135,16 +135,78 @@ def search_partners(
             break
 
     results.sort(key=lambda x: (-x["score"], x["distance_km"]))
+    if results:
+        return {
+            "scheme_id": scheme_id,
+            "searched_radii_km": steps,
+            "matched_radius_km": used_radius,
+            "max_radius_km": max_r,
+            "count": len(results),
+            "partners": results,
+            "message": None,
+            "geo_matched": True,
+        }
+
+    # No partners have usable coordinates within radius — fall back to listed partners
+    # (same national/active listings users see in manual area search).
+    fallback: list[dict[str, Any]] = []
+    for p in partners:
+        pst = status_map.get(p.id)
+        if pst and pst.status and pst.status.lower() in {"suspended", "ineligible", "blacklisted"}:
+            continue
+        fallback.append(
+            {
+                "id": p.id,
+                "name": p.name,
+                "partner_type": p.partner_type,
+                "organization": p.organization,
+                "state": p.state,
+                "district": p.district,
+                "address": p.address,
+                "phone": p.phone,
+                "email": p.email,
+                "website": p.website,
+                "latitude": p.latitude,
+                "longitude": p.longitude,
+                "distance_km": None,
+                "source_url": p.source_url,
+                "last_verified": p.last_verified.isoformat() if p.last_verified else None,
+                "freshness": freshness_state(p.last_verified),
+                "status": p.status,
+                "partner_operational_status": {
+                    "fund_utilization": pst.fund_utilization if pst else None,
+                    "npa_status": pst.npa_status if pst else None,
+                    "overdue_status": pst.overdue_status if pst else None,
+                    "status": pst.status if pst else "Current status unavailable / Last verified status",
+                    "last_verified": pst.last_verified.isoformat() if pst and pst.last_verified else None,
+                    "note": (
+                        None
+                        if pst and (pst.npa_status or pst.fund_utilization or pst.overdue_status)
+                        else "Current fund utilization / NPA / overdue data is not available from an authoritative source."
+                    ),
+                },
+                "score": 25.0,
+                "reasons": [
+                    f"No partner with map coordinates was found within {max_r} km of your GPS point",
+                    "Showing authorized/active partner listings from official source data",
+                    "Supports recommended scheme" if mapping_required else "Active partner listing",
+                ],
+            }
+        )
+
+    fallback.sort(key=lambda x: (-x["score"], x["name"]))
     return {
         "scheme_id": scheme_id,
         "searched_radii_km": steps,
-        "matched_radius_km": used_radius,
+        "matched_radius_km": None,
         "max_radius_km": max_r,
-        "count": len(results),
-        "partners": results,
+        "count": len(fallback),
+        "partners": fallback,
+        "geo_matched": False,
         "message": (
-            None
-            if results
+            f"No partners with published map coordinates were found within {max_r} km. "
+            "Showing official partner listings instead (same as area search when coordinates are unavailable)."
+            if fallback
             else f"No suitable authorized partners found within {max_r} km based on available official data."
         ),
     }

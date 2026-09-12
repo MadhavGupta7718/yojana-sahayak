@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -49,11 +50,43 @@ class SourceCrawler:
         self.delay = self.settings.crawl_delay_seconds
         self.run: Optional[ScrapingRun] = None
 
-    def crawl(self) -> ScrapingRun:
-        self.run = ScrapingRun(source_id=self.source.id, status="running")
-        self.db.add(self.run)
-        self.db.commit()
-        self.db.refresh(self.run)
+    def crawl(self, run_id: int | None = None) -> ScrapingRun:
+        if run_id is not None:
+            existing = self.db.query(ScrapingRun).filter(ScrapingRun.id == run_id).first()
+            if existing and existing.source_id == self.source.id and existing.status in ("queued", "running"):
+                self.run = existing
+                self.run.status = "running"
+                self.run.notes = ((self.run.notes or "") + " | claimed by scraper").strip(" |")
+                self.db.commit()
+            elif existing and existing.status == "failed":
+                # Cleared while waiting — do not restart
+                return existing
+            else:
+                self.run = ScrapingRun(source_id=self.source.id, status="running")
+                self.db.add(self.run)
+                self.db.commit()
+                self.db.refresh(self.run)
+        else:
+            queued = (
+                self.db.query(ScrapingRun)
+                .filter(
+                    ScrapingRun.source_id == self.source.id,
+                    ScrapingRun.status == "queued",
+                    ScrapingRun.end_time.is_(None),
+                )
+                .order_by(ScrapingRun.id.desc())
+                .first()
+            )
+            if queued:
+                self.run = queued
+                self.run.status = "running"
+                self.run.notes = ((self.run.notes or "") + " | claimed by scraper").strip(" |")
+                self.db.commit()
+            else:
+                self.run = ScrapingRun(source_id=self.source.id, status="running")
+                self.db.add(self.run)
+                self.db.commit()
+                self.db.refresh(self.run)
 
         try:
             allowed, notes = check_robots(self.source.base_url, self.ua)
@@ -321,7 +354,25 @@ class SourceCrawler:
                     changes = promote_staging(self.db, staging)
                     self.run.changes_detected += len(changes)
 
-        if any(k in url.lower() or k in text.lower() for k in ["channel partner", "channelising", "channelizing", "sca", "our-channel-partners"]):
+        # Partner extraction: require partner-page URL or explicit partner cue (word-boundary for SCA)
+        url_l = url.lower()
+        text_l = text.lower()
+        partner_url = any(
+            k in url_l
+            for k in (
+                "channel-partner",
+                "channel_partner",
+                "our-channel-partners",
+                "channelising",
+                "channelizing",
+            )
+        )
+        partner_text = bool(
+            re.search(r"\b(channel\s*partners?|channelising|channelizing|state\s+channelizing)\b", text, re.I)
+            or re.search(r"\bSCAs?\b", text)
+        )
+        blocked_url = any(b in url_l for b in ("career", "recruit", "interview", "vacancy", "/hr", "pratibha"))
+        if (partner_url or partner_text) and not blocked_url:
             partner_payloads = extract_partners(text, url) + extract_partner_categories(text, url)
             for partner in partner_payloads:
                 staging = StagingRecord(

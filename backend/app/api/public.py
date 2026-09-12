@@ -5,7 +5,7 @@ from app.database.session import get_db
 from app.location.search import search_partners
 from app.models import ApplicationGuidance, Scheme, SourceCitation, UserProfile
 from app.recommendation.engine import recommend_schemes
-from app.schemas import EMIRequest, NLPParseRequest, PartnerSearchRequest, ProfileInput
+from app.schemas import EMIRequest, ForwardGeocodeRequest, NLPParseRequest, PartnerSearchRequest, ProfileInput, ReverseGeocodeRequest
 from app.services.finance import calculate_emi
 from app.services.freshness import freshness_state
 
@@ -251,3 +251,91 @@ def nlp_parse(body: NLPParseRequest):
     from ml.inference.nlp import parse_intent
 
     return parse_intent(body.text)
+
+
+@router.post("/geo/reverse")
+def reverse_geocode(body: ReverseGeocodeRequest):
+    """Resolve GPS coordinates to address / state / district via OpenStreetMap Nominatim."""
+    import httpx
+
+    lang = "hi,en" if body.language.lower().startswith("hi") else "en"
+    url = "https://nominatim.openstreetmap.org/reverse"
+    params = {
+        "format": "jsonv2",
+        "lat": body.latitude,
+        "lon": body.longitude,
+        "zoom": 14,
+        "addressdetails": 1,
+    }
+    try:
+        with httpx.Client(timeout=12.0) as client:
+            res = client.get(
+                url,
+                params=params,
+                headers={
+                    "User-Agent": "YojanaSahayak/1.0 (local research; scheme guidance)",
+                    "Accept-Language": lang,
+                },
+            )
+            res.raise_for_status()
+            data = res.json()
+    except Exception as exc:
+        raise HTTPException(502, f"Geocoding service unavailable: {exc}") from exc
+
+    addr = data.get("address") or {}
+    state = addr.get("state") or addr.get("region") or addr.get("state_district") or ""
+    district = (
+        addr.get("state_district")
+        or addr.get("county")
+        or addr.get("city_district")
+        or addr.get("district")
+        or addr.get("city")
+        or addr.get("town")
+        or addr.get("municipality")
+        or ""
+    )
+    # Avoid duplicating state into district
+    if district and state and district.strip().lower() == state.strip().lower():
+        district = addr.get("city") or addr.get("town") or addr.get("suburb") or ""
+
+    return {
+        "latitude": body.latitude,
+        "longitude": body.longitude,
+        "display_name": data.get("display_name"),
+        "state": state or None,
+        "district": district or None,
+        "address": addr,
+    }
+
+
+@router.post("/geo/forward")
+def forward_geocode(body: ForwardGeocodeRequest):
+    """Resolve state/district to map center via OpenStreetMap Nominatim."""
+    import httpx
+
+    lang = "hi,en" if body.language.lower().startswith("hi") else "en"
+    q = ", ".join([p for p in [body.pin_code, body.district, body.state, "India"] if p])
+    try:
+        with httpx.Client(timeout=12.0) as client:
+            res = client.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"format": "json", "limit": 1, "q": q},
+                headers={
+                    "User-Agent": "YojanaSahayak/1.0 (local research; scheme guidance)",
+                    "Accept-Language": lang,
+                },
+            )
+            res.raise_for_status()
+            data = res.json()
+    except Exception as exc:
+        raise HTTPException(502, f"Geocoding service unavailable: {exc}") from exc
+
+    if not data:
+        return {"found": False, "latitude": None, "longitude": None, "label": q}
+    hit = data[0]
+    return {
+        "found": True,
+        "latitude": float(hit["lat"]),
+        "longitude": float(hit["lon"]),
+        "label": hit.get("display_name") or q,
+    }

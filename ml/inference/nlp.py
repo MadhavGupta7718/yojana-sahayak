@@ -1,8 +1,9 @@
-"""Local rule-based multilingual NLP with optional embeddings fallback."""
+"""Local hybrid NLP: rule-based extraction + optional multilingual embeddings."""
 
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from typing import Any, Optional
 
 # Amount patterns: ₹1 lakh, Rs. 5,00,000, 100000, 1.25 लाख
@@ -37,6 +38,9 @@ PROJECT_KEYWORDS = {
     "education_loan": ["education loan", "शैक्षणिक ऋण", "tuition fee", "hostel fee"],
     "micro_enterprise": ["micro", "microfinance", "सूक्ष्म", "small business", "chhote business"],
     "beauty_parlour": ["beauty", "parlour", "salon", "पार्लर"],
+    "agriculture": ["agriculture", "farming", "kheti", "कृषि", "crop"],
+    "poultry": ["poultry", "chicken", "मुर्गी"],
+    "services": ["repair", "service", "services", "मरम्मत"],
 }
 
 CATEGORY_KEYWORDS = {
@@ -44,7 +48,6 @@ CATEGORY_KEYWORDS = {
     "ST": ["st", "scheduled tribe", "अनुसूचित जनजाति", "adivasi"],
     "OBC": ["obc", "other backward", "अन्य पिछड़ा", "pichda"],
 }
-
 
 HINGLISH_MAP = {
     "mujhe": "",
@@ -54,6 +57,29 @@ HINGLISH_MAP = {
     "vyavasay": "business",
     "udyam": "business",
 }
+
+# Exemplars for embedding-based fill when rules miss (EN + HI mixed)
+PURPOSE_EXEMPLARS = [
+    ("business", "I need a business loan for self employment shop or small enterprise व्यवसाय स्वरोजगार"),
+    ("education", "I need an education loan for college university tuition studies शिक्षा पढ़ाई"),
+    ("agriculture", "I need a loan for farming dairy poultry agriculture कृषि डेयरी खेती"),
+]
+
+PROJECT_EXEMPLARS = [
+    ("dairy", "dairy milk cattle buffalo animal husbandry डेयरी दूध पशुपालन"),
+    ("kirana", "kirana grocery general store retail shop किराना दुकान"),
+    ("tailoring", "tailoring boutique garment stitching सिलाई बुटीक"),
+    ("beauty_parlour", "beauty parlour salon spa ब्यूटी पार्लर सैलून"),
+    ("transport", "transport vehicle auto taxi truck परिवहन वाहन"),
+    ("agriculture", "agriculture farming crops irrigation कृषि खेती"),
+    ("poultry", "poultry chicken farm मुर्गी पालन"),
+    ("micro_enterprise", "micro enterprise small business workshop सूक्ष्म उद्यम"),
+    ("education_loan", "education loan tuition hostel fee college शिक्षा ऋण ट्यूशन"),
+    ("services", "repair services workshop service centre मरम्मत सेवा"),
+    ("manufacturing", "manufacturing factory production unit विनिर्माण कारखाना"),
+]
+
+EMBEDDING_MIN_SCORE = 0.28
 
 
 def normalize_amount(text: str) -> Optional[float]:
@@ -76,6 +102,74 @@ def normalize_amount(text: str) -> Optional[float]:
     return None
 
 
+@lru_cache(maxsize=1)
+def _load_embedding_model():
+    from app.config import get_settings
+
+    settings = get_settings()
+    if not settings.enable_embeddings:
+        return None
+    from sentence_transformers import SentenceTransformer
+
+    return SentenceTransformer(settings.embedding_model_name)
+
+
+def embedding_similarity(query: str, documents: list[str]) -> Optional[list[float]]:
+    """Local multilingual embeddings; returns None if disabled/unavailable."""
+    try:
+        model = _load_embedding_model()
+        if model is None:
+            return None
+        q = model.encode([query], normalize_embeddings=True)
+        d = model.encode(documents, normalize_embeddings=True)
+        scores = (q @ d.T).flatten().tolist()
+        return [float(s) for s in scores]
+    except Exception:
+        return None
+
+
+def _best_label(query: str, exemplars: list[tuple[str, str]], min_score: float = EMBEDDING_MIN_SCORE) -> Optional[tuple[str, float]]:
+    docs = [text for _, text in exemplars]
+    scores = embedding_similarity(query, docs)
+    if not scores:
+        return None
+    best_i = max(range(len(scores)), key=lambda i: scores[i])
+    if scores[best_i] < min_score:
+        return None
+    return exemplars[best_i][0], scores[best_i]
+
+
+def _enrich_with_embeddings(text: str, extracted: dict[str, Any]) -> tuple[dict[str, Any], bool, float]:
+    """Fill missing purpose/project via embeddings. Returns (extracted, used, best_score)."""
+    used = False
+    best = 0.0
+
+    if "purpose" not in extracted:
+        hit = _best_label(text, PURPOSE_EXEMPLARS)
+        if hit:
+            extracted["purpose"] = hit[0]
+            best = max(best, hit[1])
+            used = True
+
+    if "project_type" not in extracted:
+        hit = _best_label(text, PROJECT_EXEMPLARS)
+        if hit:
+            extracted["project_type"] = hit[0]
+            best = max(best, hit[1])
+            used = True
+            if "purpose" not in extracted:
+                extracted["purpose"] = "education" if hit[0] == "education_loan" else "business"
+
+    return extracted, used, best
+
+
+def _text_has_keyword(kw: str, lower: str, original: str) -> bool:
+    """Avoid false hits like 'st' inside 'start' / 'something'."""
+    if len(kw) <= 3 and kw.isascii():
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(kw)}(?![a-z0-9])", lower, re.I))
+    return kw in lower or kw in original
+
+
 def parse_intent(text: str) -> dict[str, Any]:
     original = text.strip()
     lower = original.lower()
@@ -84,13 +178,13 @@ def parse_intent(text: str) -> dict[str, Any]:
 
     purpose = None
     for p, kws in PURPOSE_KEYWORDS.items():
-        if any(kw in lower or kw in original for kw in kws):
+        if any(_text_has_keyword(kw, lower, original) for kw in kws):
             purpose = p
             break
 
     project_type = None
     for p, kws in PROJECT_KEYWORDS.items():
-        if any(kw in lower or kw in original for kw in kws):
+        if any(_text_has_keyword(kw, lower, original) for kw in kws):
             project_type = p
             if purpose is None:
                 purpose = "business" if p != "education_loan" else "education"
@@ -98,7 +192,7 @@ def parse_intent(text: str) -> dict[str, Any]:
 
     category = None
     for c, kws in CATEGORY_KEYWORDS.items():
-        if any(kw in lower for kw in kws):
+        if any(_text_has_keyword(kw, lower, original) for kw in kws):
             category = c
             break
 
@@ -138,30 +232,28 @@ def parse_intent(text: str) -> dict[str, Any]:
     }
     extracted = {k: v for k, v in fields.items() if v is not None}
 
+    extracted, used_embeddings, emb_score = _enrich_with_embeddings(original, extracted)
+
+    # Re-map agriculture after embedding fill
+    if extracted.get("purpose") == "agriculture":
+        extracted["purpose"] = "business"
+        extracted.setdefault("project_type", "agriculture")
+
+    method = "hybrid" if used_embeddings else "rule_based"
+    confidence = 0.55 + 0.1 * len(extracted)
+    if used_embeddings:
+        confidence = min(0.95, confidence + 0.15 * emb_score)
+
+    notes = (
+        "Hybrid NLP (rules + local multilingual embeddings). Confirm values in the form."
+        if used_embeddings
+        else "Local rule-based NLP. Values are suggestions; user should confirm in the form."
+    )
+
     return {
         "original_text": original,
         "extracted": extracted,
-        "method": "rule_based",
-        "confidence": 0.55 + 0.1 * len(extracted),
-        "notes": "Local rule-based NLP. Values are suggestions; user should confirm in the form.",
+        "method": method,
+        "confidence": round(confidence, 3),
+        "notes": notes,
     }
-
-
-def embedding_similarity(query: str, documents: list[str]) -> Optional[list[float]]:
-    """Optional local embeddings; returns None if unavailable."""
-    try:
-        from app.config import get_settings
-
-        settings = get_settings()
-        if not settings.enable_embeddings:
-            return None
-        from sentence_transformers import SentenceTransformer
-        import numpy as np
-
-        model = SentenceTransformer(settings.embedding_model_name)
-        q = model.encode([query], normalize_embeddings=True)
-        d = model.encode(documents, normalize_embeddings=True)
-        scores = (q @ d.T).flatten().tolist()
-        return scores
-    except Exception:
-        return None

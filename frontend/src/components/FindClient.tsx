@@ -3,6 +3,19 @@
 import dynamic from "next/dynamic";
 import { useMemo, useState } from "react";
 import { api } from "@/lib/api";
+import { districtsForState, INDIA_STATES } from "@/data/indiaLocations";
+import { districtLabel } from "@/data/districtLabelsHi";
+import {
+  AGE_OPTIONS,
+  CATEGORY_OPTIONS,
+  EDUCATION_STATUS_OPTIONS,
+  EXISTING_LOAN_OPTIONS,
+  PROJECT_TYPE_OPTIONS,
+  PURPOSE_OPTIONS,
+  optLabel,
+  stateLabel,
+  type LocaleCode,
+} from "@/data/formOptions";
 
 const PartnerMap = dynamic(() => import("@/components/PartnerMap"), { ssr: false });
 
@@ -56,13 +69,17 @@ function humanField(name: string | null | undefined) {
   return map[name] || name.replace(/_/g, " ");
 }
 
-export default function FindClient({ messages }: { messages: Messages }) {
+export default function FindClient({
+  messages,
+  locale = "en",
+}: {
+  messages: Messages;
+  locale?: LocaleCode;
+}) {
   const [step, setStep] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  const [nlpText, setNlpText] = useState("");
-  const [nlpNote, setNlpNote] = useState<string | null>(null);
   const [recs, setRecs] = useState<Rec[]>([]);
   const [nearMisses, setNearMisses] = useState<Rec[]>([]);
   const [matchStatus, setMatchStatus] = useState<"matched" | "no_match" | null>(null);
@@ -70,7 +87,14 @@ export default function FindClient({ messages }: { messages: Messages }) {
   const [selected, setSelected] = useState<Rec | null>(null);
   const [emi, setEmi] = useState<any>(null);
   const [partners, setPartners] = useState<any>(null);
+  const [partnerMode, setPartnerMode] = useState<"auto" | "manual" | null>(null);
+  const [autoLat, setAutoLat] = useState("");
+  const [autoLon, setAutoLon] = useState("");
+  const [mapCenter, setMapCenter] = useState<{ lat: number; lon: number; label: string } | null>(null);
+  const [autoAddress, setAutoAddress] = useState<string | null>(null);
+  const [autoRegion, setAutoRegion] = useState<{ state?: string; district?: string }>({});
   const [locStatus, setLocStatus] = useState<string | null>(null);
+
   const [form, setForm] = useState({
     age: "",
     category: "SC",
@@ -84,20 +108,27 @@ export default function FindClient({ messages }: { messages: Messages }) {
     loan_required: "",
     education_status: "",
     pin_code: "",
-    latitude: "" as string,
-    longitude: "" as string,
   });
 
   const progress = ((step + 1) / 4) * 100;
 
   function update(key: string, value: string) {
-    setForm((f) => ({ ...f, [key]: value }));
+    setForm((f) => {
+      if (key === "state") {
+        return { ...f, state: value, district: "" };
+      }
+      return { ...f, [key]: value };
+    });
     setFieldErrors((e) => {
       const next = { ...e };
       delete next[key];
+      if (key === "state") delete next.district;
       return next;
     });
   }
+
+  const districtOptions = useMemo(() => districtsForState(form.state), [form.state]);
+
 
   function validateStep(s: number): boolean {
     const errs: Record<string, string> = {};
@@ -128,60 +159,6 @@ export default function FindClient({ messages }: { messages: Messages }) {
     }
     setError(null);
     return true;
-  }
-
-  async function parseNlp() {
-    if (!nlpText.trim()) {
-      setError("Type your need first, then click Understand my text.");
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    setNlpNote(null);
-    try {
-      const out = await api<{ extracted: Record<string, unknown>; notes?: string }>("/api/v1/nlp/parse", {
-        method: "POST",
-        body: JSON.stringify({ text: nlpText }),
-      });
-      const e = out.extracted || {};
-      const filled: string[] = [];
-      const nextForm = { ...form };
-      if (e.purpose) {
-        nextForm.purpose = String(e.purpose) === "agriculture" ? "business" : String(e.purpose);
-        filled.push("purpose");
-      }
-      if (e.project_type) {
-        nextForm.project_type = String(e.project_type);
-        filled.push("project type");
-      }
-      if (e.category) {
-        nextForm.category = String(e.category);
-        filled.push("category");
-      }
-      if (e.age != null) {
-        nextForm.age = String(e.age);
-        filled.push("age");
-      }
-      if (e.loan_required != null) {
-        nextForm.loan_required = String(e.loan_required);
-        filled.push("loan amount");
-      }
-      if (e.annual_family_income != null) {
-        nextForm.annual_family_income = String(e.annual_family_income);
-        filled.push("income");
-      }
-      setForm(nextForm);
-      setFieldErrors({});
-      if (filled.length === 0) {
-        setNlpNote("Could not extract clear details. Please fill the form fields manually.");
-      } else {
-        setNlpNote(`Filled from your text: ${filled.join(", ")}. Please review and complete remaining required fields.`);
-      }
-    } catch {
-      setError("Could not understand the text. Please fill the form manually.");
-    } finally {
-      setLoading(false);
-    }
   }
 
   async function runAssessment() {
@@ -221,6 +198,8 @@ export default function FindClient({ messages }: { messages: Messages }) {
       const first = matched[0] || misses[0] || null;
       setSelected(first);
       setPartners(null);
+      setPartnerMode(null);
+      setMapCenter(null);
       setEmi(null);
       if (first && matched.length) await calcEmi(first);
       setStep(3);
@@ -248,52 +227,201 @@ export default function FindClient({ messages }: { messages: Messages }) {
     setEmi(out);
   }
 
+  async function reverseGeocode(lat: number, lon: number) {
+    try {
+      const data = await api<{
+        display_name?: string;
+        state?: string | null;
+        district?: string | null;
+      }>("/api/v1/geo/reverse", {
+        method: "POST",
+        body: JSON.stringify({ latitude: lat, longitude: lon, language: locale }),
+      });
+      return {
+        display: data.display_name || undefined,
+        state: data.state || "",
+        district: data.district || "",
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function matchIndiaState(name: string) {
+    if (!name) return "";
+    const lower = name.toLowerCase().replace(/\s+/g, " ").trim();
+    const exact = INDIA_STATES.find((s) => s.toLowerCase() === lower);
+    if (exact) return exact;
+    const base = (s: string) => s.toLowerCase().split(" (")[0];
+    return (
+      INDIA_STATES.find((s) => base(s) === lower || lower.includes(base(s)) || base(s).includes(lower)) || ""
+    );
+  }
+
+  function matchDistrict(state: string, name: string) {
+    if (!state || !name) return "";
+    const opts = districtsForState(state);
+    const lower = name.toLowerCase().replace(/\s+district$/i, "").trim();
+    return (
+      opts.find((d) => d.toLowerCase() === lower) ||
+      opts.find((d) => d.toLowerCase().includes(lower) || lower.includes(d.toLowerCase())) ||
+      ""
+    );
+  }
+
+  async function runAutoPartnerSearch(lat: number, lon: number, addressLabel: string, region: { state?: string; district?: string }) {
+    if (!selected) return;
+    setLoading(true);
+    setError(null);
+    setPartners(null);
+    setPartnerMode("auto");
+    try {
+      let out = await api<any>("/api/v1/partners/search", {
+        method: "POST",
+        body: JSON.stringify({
+          scheme_id: selected.scheme_id,
+          latitude: lat,
+          longitude: lon,
+        }),
+      });
+
+      // If GPS radius still empty, mirror manual area search using reverse-geocoded region
+      if ((!out.count || out.count === 0) && region.state) {
+        const matchedState = matchIndiaState(region.state);
+        const area = await api<any>("/api/v1/partners/search", {
+          method: "POST",
+          body: JSON.stringify({
+            scheme_id: selected.scheme_id,
+            state: matchedState || region.state,
+            district: region.district || null,
+          }),
+        });
+        if (area.count > 0) {
+          out = {
+            ...area,
+            mode: "auto_region_fallback",
+            message: messages.partnerFallbackNote || area.message,
+          };
+        }
+      }
+
+      setPartners(out);
+      setMapCenter({
+        lat,
+        lon,
+        label: addressLabel || (locale === "hi" ? "आपका स्वचालित स्थान" : "Your automatic location"),
+      });
+      setLocStatus(null);
+    } catch {
+      setError(messages.error);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function useGeo() {
     setLocStatus(null);
+    setAutoAddress(null);
     if (!navigator.geolocation) {
-      setError("This browser does not support location. Enter state and district instead.");
+      setError(messages.noGeoSupport || "This browser does not support location.");
       return;
     }
-    setLocStatus("Detecting your location…");
+    setLocStatus(messages.locating || "Detecting your location…");
+    setLoading(true);
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        update("latitude", String(pos.coords.latitude));
-        update("longitude", String(pos.coords.longitude));
-        setLocStatus("Location detected. You can now search nearby partners.");
+      async (pos) => {
+        const lat = pos.coords.latitude;
+        const lon = pos.coords.longitude;
+        setAutoLat(String(lat));
+        setAutoLon(String(lon));
         setError(null);
+        let addressLabel = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+        let region: { state?: string; district?: string } = {};
+        try {
+          const geo = await reverseGeocode(lat, lon);
+          if (geo?.display) {
+            addressLabel = geo.display;
+            setAutoAddress(geo.display);
+          }
+          region = { state: geo?.state, district: geo?.district };
+          setAutoRegion(region);
+          const matchedState = matchIndiaState(geo?.state || "");
+          const matchedDistrict = matchDistrict(matchedState, geo?.district || "");
+          if (matchedState || geo?.state) {
+            setForm((f) => ({
+              ...f,
+              state: matchedState || f.state,
+              district: matchedDistrict || f.district,
+            }));
+          }
+          // Keep raw detected names even if dropdown match fails
+          setAutoRegion({
+            state: matchedState || geo?.state || "",
+            district: matchedDistrict || geo?.district || "",
+          });
+        } catch {
+          setAutoAddress(null);
+        }
+        await runAutoPartnerSearch(lat, lon, addressLabel, region);
       },
       () => {
         setLocStatus(null);
-        setError("Location permission denied. Enter state and district to continue.");
+        setLoading(false);
+        setError(messages.locationDenied || "Location permission denied.");
       },
       { enableHighAccuracy: true, timeout: 15000 }
     );
   }
 
-  async function searchPartners() {
+  async function geocodeRegion(state: string, district?: string, pin?: string) {
+    try {
+      const data = await api<{ found: boolean; latitude?: number; longitude?: number; label?: string }>(
+        "/api/v1/geo/forward",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            state,
+            district: district || null,
+            pin_code: pin || null,
+            language: locale,
+          }),
+        }
+      );
+      if (!data.found || data.latitude == null || data.longitude == null) return null;
+      return {
+        lat: data.latitude,
+        lon: data.longitude,
+        label: data.label || [district, state].filter(Boolean).join(", ") || state,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async function searchPartnersManual() {
     if (!selected) return;
-    if (!form.latitude && !form.longitude && !form.state.trim()) {
-      setError("Use automatic location or enter at least your state to search partners.");
+    if (!form.state.trim()) {
+      setError(locale === "hi" ? "मैन्युअल खोज के लिए कम से कम राज्य चुनें।" : "Enter at least your state for manual partner search.");
       return;
     }
     setLoading(true);
     setError(null);
+    setPartners(null);
+    setPartnerMode("manual");
+    setAutoAddress(null);
     try {
-      const body: any = {
-        scheme_id: selected.scheme_id,
-        state: form.state || null,
-        district: form.district || null,
-        pin_code: form.pin_code || null,
-      };
-      if (form.latitude && form.longitude) {
-        body.latitude = Number(form.latitude);
-        body.longitude = Number(form.longitude);
-      }
       const out = await api("/api/v1/partners/search", {
         method: "POST",
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          scheme_id: selected.scheme_id,
+          state: form.state || null,
+          district: form.district || null,
+          pin_code: form.pin_code || null,
+        }),
       });
       setPartners(out);
+      const center = await geocodeRegion(form.state, form.district || undefined, form.pin_code || undefined);
+      setMapCenter(center);
     } catch {
       setError(messages.error);
     } finally {
@@ -306,67 +434,88 @@ export default function FindClient({ messages }: { messages: Messages }) {
   }, [messages, step]);
 
   return (
-    <div className="page-wrap">
-      <h1 className="text-navy font-display">{messages.findScheme}</h1>
-      <p className="mt-2 text-muted">{stepLabel}</p>
-      <div className="progress mt-4">
-        <span style={{ width: `${progress}%` }} />
-      </div>
+    <div className="ys-page">
+      <header className="ys-pagehead">
+        <div className="ys-wrap" style={{ maxWidth: "56rem" }}>
+          <p className="ys-kicker">Match</p>
+          <h1 className="ys-h1">{messages.findScheme}</h1>
+          <p className="ys-sub">{stepLabel}</p>
+          <div className="progress">
+            <span style={{ width: `${progress}%` }} />
+          </div>
+        </div>
+      </header>
 
+      <div className="find-workspace">
       {error && <p className="error-box">{error}</p>}
 
-      {step < 3 && (
-        <div className="panel mt-6">
-          <label className="label">{messages.nlpPlaceholder}</label>
-          <textarea
-            className="input min-h-24"
-            value={nlpText}
-            onChange={(e) => setNlpText(e.target.value)}
-            placeholder={messages.nlpHint}
-          />
-          <button type="button" className="btn btn-secondary mt-3" onClick={parseNlp} disabled={loading}>
-            {messages.parse}
-          </button>
-          {nlpNote && <p className="mt-3 text-sm" style={{ color: "var(--green)" }}>{nlpNote}</p>}
-        </div>
-      )}
-
       {step === 0 && (
-        <div className="panel mt-6 form-grid">
+        <div className="panel form-grid">
           <div>
             <label className="label">{messages.age} *</label>
-            <input className="input" value={form.age} onChange={(e) => update("age", e.target.value)} required />
+            <select className="select" value={form.age} onChange={(e) => update("age", e.target.value)} required>
+              <option value="">{messages.selectAge || "Select age"}</option>
+              {AGE_OPTIONS.map((age) => (
+                <option key={age} value={age}>
+                  {age}
+                </option>
+              ))}
+            </select>
             {fieldErrors.age && <p className="field-error">{fieldErrors.age}</p>}
           </div>
           <div>
             <label className="label">{messages.category} *</label>
             <select className="select" value={form.category} onChange={(e) => update("category", e.target.value)}>
-              <option value="SC">SC</option>
-              <option value="ST">ST</option>
-              <option value="OBC">OBC</option>
-              <option value="Other">Other</option>
+              {CATEGORY_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {optLabel(o, locale)}
+                </option>
+              ))}
             </select>
             {fieldErrors.category && <p className="field-error">{fieldErrors.category}</p>}
           </div>
           <div>
             <label className="label">{messages.state} *</label>
-            <input className="input" value={form.state} onChange={(e) => update("state", e.target.value)} required />
+            <select className="select" value={form.state} onChange={(e) => update("state", e.target.value)} required>
+              <option value="">{messages.selectState || "Select state / UT"}</option>
+              {INDIA_STATES.map((s) => (
+                <option key={s} value={s}>
+                  {stateLabel(s, locale)}
+                </option>
+              ))}
+            </select>
             {fieldErrors.state && <p className="field-error">{fieldErrors.state}</p>}
           </div>
           <div>
             <label className="label">{messages.district} *</label>
-            <input className="input" value={form.district} onChange={(e) => update("district", e.target.value)} required />
+            <select
+              className="select"
+              value={form.district}
+              onChange={(e) => update("district", e.target.value)}
+              required
+              disabled={!form.state}
+            >
+              <option value="">{form.state ? messages.selectDistrict || "Select district" : messages.selectStateFirst || "Select state first"}</option>
+              {districtOptions.map((d) => (
+                <option key={d} value={d}>
+                  {districtLabel(d, locale)}
+                </option>
+              ))}
+            </select>
             {fieldErrors.district && <p className="field-error">{fieldErrors.district}</p>}
           </div>
         </div>
       )}
 
       {step === 1 && (
-        <div className="panel mt-6 form-grid">
+        <div className="panel form-grid">
           <div>
             <label className="label">{messages.income} *</label>
             <input
               className="input"
+              type="number"
+              min={1}
+              step={1000}
               value={form.annual_family_income}
               onChange={(e) => update("annual_family_income", e.target.value)}
               required
@@ -376,43 +525,83 @@ export default function FindClient({ messages }: { messages: Messages }) {
           <div>
             <label className="label">{messages.existingLoan}</label>
             <select className="select" value={form.existing_loan} onChange={(e) => update("existing_loan", e.target.value)}>
-              <option value="no">{messages.no}</option>
-              <option value="yes">{messages.yes}</option>
+              {EXISTING_LOAN_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {optLabel(o, locale)}
+                </option>
+              ))}
             </select>
           </div>
         </div>
       )}
 
       {step === 2 && (
-        <div className="panel mt-6 form-grid">
+        <div className="panel form-grid">
           <div>
             <label className="label">{messages.purpose} *</label>
             <select className="select" value={form.purpose} onChange={(e) => update("purpose", e.target.value)}>
-              <option value="business">{messages.business}</option>
-              <option value="education">{messages.education}</option>
-              <option value="self-employment">{messages.selfEmployment}</option>
-              <option value="other">{messages.other}</option>
+              {PURPOSE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {optLabel(o, locale)}
+                </option>
+              ))}
             </select>
           </div>
           <div>
             <label className="label">{messages.projectType} *</label>
-            <input className="input" value={form.project_type} onChange={(e) => update("project_type", e.target.value)} />
+            <select className="select" value={form.project_type} onChange={(e) => update("project_type", e.target.value)}>
+              <option value="">{messages.selectProject || "Select project / activity"}</option>
+              {PROJECT_TYPE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {optLabel(o, locale)}
+                </option>
+              ))}
+              {form.project_type &&
+                !PROJECT_TYPE_OPTIONS.some((o) => o.value === form.project_type) && (
+                  <option value={form.project_type}>{form.project_type}</option>
+                )}
+            </select>
             {fieldErrors.project_type && <p className="field-error">{fieldErrors.project_type}</p>}
           </div>
           <div>
             <label className="label">{messages.projectCost} *</label>
-            <input className="input" value={form.project_cost} onChange={(e) => update("project_cost", e.target.value)} />
+            <input
+              className="input"
+              type="number"
+              min={1}
+              step={1000}
+              value={form.project_cost}
+              onChange={(e) => update("project_cost", e.target.value)}
+            />
             {fieldErrors.project_cost && <p className="field-error">{fieldErrors.project_cost}</p>}
           </div>
           <div>
             <label className="label">{messages.loanRequired} *</label>
-            <input className="input" value={form.loan_required} onChange={(e) => update("loan_required", e.target.value)} />
+            <input
+              className="input"
+              type="number"
+              min={1}
+              step={1000}
+              value={form.loan_required}
+              onChange={(e) => update("loan_required", e.target.value)}
+            />
             {fieldErrors.loan_required && <p className="field-error">{fieldErrors.loan_required}</p>}
           </div>
           {form.purpose === "education" && (
             <div className="span-2">
               <label className="label">{messages.educationStatus} *</label>
-              <input className="input" value={form.education_status} onChange={(e) => update("education_status", e.target.value)} />
+              <select
+                className="select"
+                value={form.education_status}
+                onChange={(e) => update("education_status", e.target.value)}
+              >
+                <option value="">{messages.selectEducation || "Select education status"}</option>
+                {EDUCATION_STATUS_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {optLabel(o, locale)}
+                  </option>
+                ))}
+              </select>
               {fieldErrors.education_status && <p className="field-error">{fieldErrors.education_status}</p>}
             </div>
           )}
@@ -444,6 +633,8 @@ export default function FindClient({ messages }: { messages: Messages }) {
                     setSelected(r);
                     calcEmi(r);
                     setPartners(null);
+                    setPartnerMode(null);
+                    setMapCenter(null);
                   }}
                 >
                   <div className="scheme-card__top">
@@ -475,6 +666,8 @@ export default function FindClient({ messages }: { messages: Messages }) {
                     setSelected(r);
                     setEmi(null);
                     setPartners(null);
+                    setPartnerMode(null);
+                    setMapCenter(null);
                   }}
                 >
                   <div className="scheme-card__top">
@@ -625,54 +818,131 @@ export default function FindClient({ messages }: { messages: Messages }) {
               <section>
                 <h4>{messages.findPartner}</h4>
                 <p className="text-sm text-muted">{messages.partnerPrivacy}</p>
-                <div className="row mt-3">
-                  <button type="button" className="btn btn-secondary" onClick={useGeo}>
-                    {messages.useLocation}
-                  </button>
+                <p className="text-sm text-muted">{messages.oneSearchMethod}</p>
+
+                <div className="partner-search-grid mt-3">
+                  <div className="partner-mode-card">
+                    <h5>{messages.autoLocationTitle || "Automatic location"}</h5>
+                    <p className="text-sm text-muted">{messages.autoLocationHelp}</p>
+                    <div className="row mt-3">
+                      <button type="button" className="btn btn-primary" onClick={useGeo} disabled={loading}>
+                        {messages.useLocation}
+                      </button>
+                    </div>
+                    {locStatus && partnerMode !== "manual" && (
+                      <p className="mt-2 text-sm" style={{ color: "var(--green)" }}>{locStatus}</p>
+                    )}
+                    {(autoLat || autoLon || autoAddress || autoRegion.state) && (
+                      <div className="fact-grid mt-3">
+                        <div>
+                          <span>{messages.coordinates || "Coordinates"}</span>
+                          <strong>
+                            {autoLat && autoLon
+                              ? `${Number(autoLat).toFixed(5)}, ${Number(autoLon).toFixed(5)}`
+                              : "—"}
+                          </strong>
+                        </div>
+                        <div>
+                          <span>{messages.detectedState || "Detected state"}</span>
+                          <strong>
+                            {autoRegion.state
+                              ? stateLabel(matchIndiaState(autoRegion.state) || autoRegion.state, locale)
+                              : "—"}
+                          </strong>
+                        </div>
+                        <div>
+                          <span>{messages.detectedDistrict || "Detected district"}</span>
+                          <strong>{autoRegion.district || "—"}</strong>
+                        </div>
+                        <div style={{ gridColumn: "1 / -1" }}>
+                          <span>{messages.detectedAddress || "Detected address"}</span>
+                          <strong style={{ fontSize: "0.92rem", fontWeight: 600 }}>{autoAddress || "—"}</strong>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="partner-mode-card">
+                    <h5>{messages.manualLocationTitle || "Manual location"}</h5>
+                    <p className="text-sm text-muted">{messages.manualLocationHelp}</p>
+                    <div className="form-grid mt-3">
+                      <div>
+                        <label className="label">{messages.state}</label>
+                        <select className="select" value={form.state} onChange={(e) => update("state", e.target.value)}>
+                          <option value="">{messages.selectState || "Select state / UT"}</option>
+                          {INDIA_STATES.map((s) => (
+                            <option key={s} value={s}>
+                              {stateLabel(s, locale)}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="label">{messages.district}</label>
+                        <select
+                          className="select"
+                          value={form.district}
+                          onChange={(e) => update("district", e.target.value)}
+                          disabled={!form.state}
+                        >
+                          <option value="">
+                            {form.state
+                              ? messages.selectDistrict || "Select district"
+                              : messages.selectStateFirst || "Select state first"}
+                          </option>
+                          {districtOptions.map((d) => (
+                            <option key={d} value={d}>
+                              {districtLabel(d, locale)}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="label">{messages.pin}</label>
+                        <input className="input" value={form.pin_code} onChange={(e) => update("pin_code", e.target.value)} />
+                      </div>
+                    </div>
+                    <button type="button" className="btn btn-primary mt-3" onClick={searchPartnersManual} disabled={loading}>
+                      {messages.searchByArea || messages.searchPartners}
+                    </button>
+                  </div>
                 </div>
-                {locStatus && <p className="mt-2 text-sm" style={{ color: "var(--green)" }}>{locStatus}</p>}
-                {(form.latitude || form.longitude) && (
-                  <p className="mt-2 text-sm text-muted">
-                    Detected coordinates: {Number(form.latitude).toFixed(5)}, {Number(form.longitude).toFixed(5)}
-                  </p>
-                )}
-                <div className="form-grid mt-3">
-                  <div>
-                    <label className="label">{messages.state}</label>
-                    <input className="input" value={form.state} onChange={(e) => update("state", e.target.value)} />
-                  </div>
-                  <div>
-                    <label className="label">{messages.district}</label>
-                    <input className="input" value={form.district} onChange={(e) => update("district", e.target.value)} />
-                  </div>
-                  <div>
-                    <label className="label">{messages.pin}</label>
-                    <input className="input" value={form.pin_code} onChange={(e) => update("pin_code", e.target.value)} />
-                  </div>
-                </div>
-                <button type="button" className="btn btn-primary mt-3" onClick={searchPartners} disabled={loading}>
-                  {messages.searchPartners}
-                </button>
 
                 {partners && (
                   <div className="mt-4 space-y">
-                    <p className="text-sm">
-                      {partners.mode === "geocoordinate"
-                        ? `Search radius used: ${partners.matched_radius_km ?? "none"} km`
-                        : "Searched by state/district (no map coordinates from you)"}
-                      {" · "}Found {partners.count} partner(s)
-                    </p>
+                    <div className="search-mode-banner">
+                      <strong>{messages.latestSearch || "Latest search"}:</strong>{" "}
+                      {partnerMode === "auto"
+                        ? messages.latestSearchAuto || "Automatic location (GPS)"
+                        : `${messages.latestSearchManual || "Manual area search"} (${[form.district, form.state]
+                            .filter(Boolean)
+                            .map((x) => (x === form.state ? stateLabel(x, locale) : x))
+                            .join(", ") || "—"})`}
+                      {" · "}
+                      {partners.matched_radius_km
+                        ? `${locale === "hi" ? "त्रिज्या" : "Radius"}: ${partners.matched_radius_km} km`
+                        : locale === "hi"
+                          ? "क्षेत्र सूची"
+                          : "Area listings"}
+                      {" · "}
+                      {locale === "hi" ? "मिले" : "Found"} {partners.count}{" "}
+                      {locale === "hi" ? "पार्टनर" : "partner(s)"}
+                    </div>
 
-                    {form.latitude && form.longitude && (
+                    {mapCenter && (
                       <PartnerMap
-                        userLat={Number(form.latitude)}
-                        userLon={Number(form.longitude)}
+                        key={`${partnerMode}-${mapCenter.lat}-${mapCenter.lon}-${partners.count}`}
+                        userLat={mapCenter.lat}
+                        userLon={mapCenter.lon}
                         partners={partners.partners || []}
-                        radiusKm={partners.matched_radius_km}
+                        radiusKm={partnerMode === "auto" ? partners.matched_radius_km : null}
+                        centerLabel={mapCenter.label}
+                        mapHint={messages.mapHint}
                       />
                     )}
 
                     {partners.count === 0 && <p className="panel">{partners.message || messages.noPartners}</p>}
+                    {partners.message && partners.count > 0 && <p className="text-sm text-muted">{partners.message}</p>}
 
                     {(partners.partners || []).map((p: any) => (
                       <div key={p.id} className="partner-card">
@@ -680,8 +950,10 @@ export default function FindClient({ messages }: { messages: Messages }) {
                         <div className="text-sm text-muted">
                           {p.distance_km != null
                             ? `${p.distance_km} ${messages.kmAway}`
-                            : `${p.district || ""} ${p.state || ""}`.trim() || "Location details limited"}
+                            : `${p.district || ""} ${p.state ? stateLabel(String(p.state), locale) : ""}`.trim() ||
+                              (locale === "hi" ? "स्थान विवरण सीमित" : "Location details limited")}
                         </div>
+                        {p.address && <div className="text-sm text-muted mt-1">{p.address}</div>}
                         <ul className="why-list compact">
                           {(p.reasons || []).map((r: string, idx: number) => (
                             <li key={idx}>{r}</li>
@@ -739,6 +1011,7 @@ export default function FindClient({ messages }: { messages: Messages }) {
             {loading ? messages.loading : messages.continue}
           </button>
         )}
+      </div>
       </div>
     </div>
   );

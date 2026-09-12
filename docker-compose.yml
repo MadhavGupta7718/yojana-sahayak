@@ -40,6 +40,7 @@ services:
       - ./scraper:/app/scraper
       - ./ml:/app/ml
       - ./database:/app/database
+      - ./models:/app/models
       - uploads:/app/uploads
     depends_on:
       db:

@@ -21,20 +21,23 @@ export default function PartnerMap({
   userLon,
   partners,
   radiusKm,
+  centerLabel = "Your search location",
+  mapHint,
 }: {
   userLat: number;
   userLon: number;
   partners: Partner[];
   radiusKm?: number | null;
+  centerLabel?: string;
+  mapHint?: string;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<L.Map | null>(null);
 
   useEffect(() => {
-    if (!ref.current || mapRef.current) return;
+    if (!ref.current) return;
 
+    let cancelled = false;
     const map = L.map(ref.current).setView([userLat, userLon], radiusKm && radiusKm <= 40 ? 10 : 8);
-    mapRef.current = map;
 
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
@@ -51,9 +54,7 @@ export default function PartnerMap({
       shadowSize: [41, 41],
     });
 
-    L.marker([userLat, userLon], { icon })
-      .addTo(map)
-      .bindPopup("<strong>Your search location</strong>");
+    L.marker([userLat, userLon], { icon }).addTo(map).bindPopup(`<strong>${centerLabel}</strong>`);
 
     if (radiusKm) {
       L.circle([userLat, userLon], {
@@ -63,32 +64,46 @@ export default function PartnerMap({
       }).addTo(map);
     }
 
-    const withCoords = partners.filter((p) => p.latitude != null && p.longitude != null);
-    withCoords.forEach((p) => {
-      const html = [
-        `<strong>${p.name}</strong>`,
-        [p.district, p.state].filter(Boolean).join(", "),
-        p.distance_km != null ? `${p.distance_km} km away` : "",
-        p.source_url ? `<a href="${p.source_url}" target="_blank" rel="noreferrer">Official source</a>` : "",
-      ]
-        .filter(Boolean)
-        .join("<br/>");
-      L.marker([p.latitude as number, p.longitude as number], { icon }).addTo(map).bindPopup(html);
-    });
+    partners
+      .filter((p) => p.latitude != null && p.longitude != null)
+      .forEach((p) => {
+        const html = [
+          `<strong>${p.name}</strong>`,
+          [p.district, p.state].filter(Boolean).join(", "),
+          p.distance_km != null ? `${p.distance_km} km` : "",
+          p.source_url ? `<a href="${p.source_url}" target="_blank" rel="noreferrer">Source</a>` : "",
+        ]
+          .filter(Boolean)
+          .join("<br/>");
+        L.marker([p.latitude as number, p.longitude as number], { icon }).addTo(map).bindPopup(html);
+      });
 
-    setTimeout(() => map.invalidateSize(), 200);
+    const timer = window.setTimeout(() => {
+      if (cancelled) return;
+      try {
+        map.invalidateSize();
+      } catch {
+        // Map may already be removed during fast remounts
+      }
+    }, 250);
 
     return () => {
-      map.remove();
-      mapRef.current = null;
+      cancelled = true;
+      window.clearTimeout(timer);
+      try {
+        map.remove();
+      } catch {
+        // ignore double-remove
+      }
     };
-  }, [userLat, userLon, partners, radiusKm]);
+  }, [userLat, userLon, partners, radiusKm, centerLabel]);
 
   return (
     <div>
       <div ref={ref} className="map-wrap" />
       <p className="text-sm text-muted mt-2">
-        Interactive OpenStreetMap. Partner pins appear only when coordinates are available from an official source.
+        {mapHint ||
+          "Interactive OpenStreetMap. Partner pins appear only when coordinates are available from an official source."}
       </p>
     </div>
   );

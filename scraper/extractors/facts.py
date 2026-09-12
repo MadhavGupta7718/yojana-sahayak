@@ -149,19 +149,51 @@ def extract_scheme_fields(text: str, page_title: str | None = None, url: str = "
     return {"payload": payload, "original_text": originals}
 
 
+def _is_partner_source_url(url: str) -> bool:
+    u = (url or "").lower()
+    blocked = ("career", "recruit", "interview", "vacancy", "hr/", "/hr", "tender", "pratibha", "upsc")
+    if any(b in u for b in blocked):
+        return False
+    allowed = (
+        "channel-partner",
+        "channel_partner",
+        "channelpartner",
+        "our-channel-partners",
+        "channelising",
+        "channelizing",
+        "/sca",
+        "state-channel",
+    )
+    return any(a in u for a in allowed)
+
+
+def _looks_like_person_or_job(name: str) -> bool:
+    n = name or ""
+    if re.match(r"^(Mr\.|Ms\.|Mrs\.|Shri|Smt\.?|Dr\.)\b", n, re.I):
+        return True
+    if re.search(r"\b(Manager|Deputy|Assistant|Officer|Director|Candidate|Selected|Interview)\b", n, re.I):
+        return True
+    if re.search(r"\b(Pay Scale|Level E-|IDA Pattern|UPSC)\b", n, re.I):
+        return True
+    return False
+
+
 def extract_partners(text: str, url: str = "") -> list[dict[str, Any]]:
     """Extract channel partner / SCA mentions when structured lists exist."""
+    if url and not _is_partner_source_url(url):
+        # Only extract agency-like names from known partner pages (never careers/HR PDFs)
+        return []
+
     partners = []
-    # Pattern: lines that look like agency names with state
     for m in re.finditer(
         r"(?P<name>[A-Z][A-Za-z0-9 &.,\-()]{8,120}(?:Corporation|Corporation Ltd|Nigam|Board|Agency|Bank|Society))",
         text,
     ):
         name = normalize_whitespace(m.group("name"))
-        # Skip person/staff false positives
-        if re.match(r"^(Mr\.|Ms\.|Mrs\.|Shri|Smt)\b", name, re.I):
+        if _looks_like_person_or_job(name):
             continue
-        if re.search(r"\b(Manager|Deputy|Assistant|Officer|Director)\b", name, re.I):
+        # NSFDC itself is the apex body, not a channel partner listing row
+        if re.search(r"national scheduled castes finance", name, re.I):
             continue
         partners.append(
             {
@@ -170,12 +202,10 @@ def extract_partners(text: str, url: str = "") -> list[dict[str, Any]]:
                 "partner_type": "channelizing_agency",
                 "source_url": url,
                 "status": "active",
-                # Coordinates intentionally omitted unless present in source
                 "latitude": None,
                 "longitude": None,
             }
         )
-    # Deduplicate
     seen = set()
     unique = []
     for p in partners:
@@ -188,17 +218,31 @@ def extract_partners(text: str, url: str = "") -> list[dict[str, Any]]:
 
 def extract_partner_categories(text: str, url: str = "") -> list[dict[str, Any]]:
     """Extract channel partner category rows when individual agency lists are PDF-only."""
+    # Allow FAQ/partner pages; block careers
+    u = (url or "").lower()
+    if any(b in u for b in ("career", "recruit", "interview", "vacancy", "hr/")):
+        return []
+
     categories = [
         ("State Channelizing Agencies (SCAs)", "state_channelizing_agency"),
         ("Public Sector Banks (PSBs)", "public_sector_bank"),
         ("Regional Rural Banks (RRBs)", "regional_rural_bank"),
-        ("Non-Banking Financial Company", "nbfc_mfi"),
+        ("Non-Banking Financial Company (NBFC-MFI)", "nbfc_mfi"),
         ("Co-operative Banks", "cooperative_bank"),
-        ("Small Finance Bank", "small_finance_bank"),
-        ("Cooperative Society", "cooperative_society"),
-        ("SIDBI", "development_bank"),
+        ("Small Finance Banks (SFBs)", "small_finance_bank"),
+        ("Cooperative Societies", "cooperative_society"),
+        ("SIDBI (Development Bank channel)", "development_bank"),
     ]
     found = []
+    # Require an explicit partner-context cue in page text/url
+    partner_cue = re.search(
+        r"\b(channel\s*partners?|channelising|channelizing|state\s+channelizing|SCAs?)\b",
+        f"{url}\n{text}",
+        re.I,
+    )
+    if not partner_cue and "faq" not in u:
+        return []
+
     for label, ptype in categories:
         needle = label.split("(")[0].strip()
         if re.search(re.escape(needle), text, re.I) or re.search(re.escape(label), text, re.I):

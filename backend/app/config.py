@@ -30,8 +30,8 @@ class Settings(BaseSettings):
     freshness_fresh_days: int = 7
     freshness_aging_days: int = 30
 
-    enable_embeddings: bool = False
-    embedding_model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    enable_embeddings: bool = True
+    embedding_model_name: str = "/app/models/paraphrase-multilingual-MiniLM-L12-v2"
     upload_dir: str = "/app/uploads"
 
     @property

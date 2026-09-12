@@ -19,17 +19,29 @@ export default async function SchemesPage() {
   const schemes = await fetchSchemes();
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-10">
-      <h1 className="font-display text-3xl text-[var(--navy)]">{t(messages, "exploreSchemes")}</h1>
-      <div className="mt-6 grid gap-4">
-        {schemes.length === 0 && <p className="panel">{t(messages, "emptySchemes")}</p>}
+    <div className="ys-page">
+      <header className="ys-pagehead">
+        <div className="ys-wrap">
+          <p className="ys-kicker">Catalogue</p>
+          <h1 className="ys-h1">{t(messages, "exploreSchemes")}</h1>
+          <p className="ys-sub">
+            {locale === "hi"
+              ? "आधिकारिक स्रोतों से जुड़ी योजनाएँ — विवरण सरकारी वेबसाइट पर सत्यापित करें।"
+              : "Schemes linked to official sources — always verify on the government website."}
+          </p>
+        </div>
+      </header>
+
+      <div className="ys-wrap ys-schemes">
+        {schemes.length === 0 && <p className="ys-empty">{t(messages, "emptySchemes")}</p>}
         {schemes.map((s: any) => (
-          <article key={s.id} className="panel">
-            <h2 className="text-xl font-semibold">{s.name}</h2>
-            <p className="mt-2 text-sm text-[var(--muted)]">{s.description?.slice(0, 280) || t(messages, "notAvailable")}</p>
-            <div className="mt-3 flex flex-wrap gap-4 text-sm">
+          <article key={s.id} className="ys-scheme">
+            <h2>{s.name}</h2>
+            <p>{s.description?.slice(0, 280) || t(messages, "notAvailable")}</p>
+            <div className="ys-scheme__meta">
               <span>
-                Max loan: {s.max_loan != null ? `₹${s.max_loan}` : t(messages, "notAvailable")}
+                Max loan:{" "}
+                {s.max_loan != null ? `₹${Number(s.max_loan).toLocaleString("en-IN")}` : t(messages, "notAvailable")}
               </span>
               <span>
                 Interest: {s.interest_rate != null ? `${s.interest_rate}%` : t(messages, "notAvailable")}
@@ -39,8 +51,8 @@ export default async function SchemesPage() {
               </span>
             </div>
             {s.source_url && (
-              <a className="source-link" href={s.source_url} target="_blank" rel="noreferrer">
-                {t(messages, "officialSource")} — verify on official website
+              <a className="ys-link" href={s.source_url} target="_blank" rel="noreferrer">
+                {t(messages, "officialSource")} →
               </a>
             )}
           </article>

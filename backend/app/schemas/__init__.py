@@ -46,6 +46,19 @@ class NLPParseRequest(BaseModel):
     text: str = Field(..., min_length=2, max_length=2000)
 
 
+class ReverseGeocodeRequest(BaseModel):
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+    language: str = Field("en", min_length=2, max_length=10)
+
+
+class ForwardGeocodeRequest(BaseModel):
+    state: str = Field(..., min_length=1)
+    district: Optional[str] = None
+    pin_code: Optional[str] = None
+    language: str = Field("en", min_length=2, max_length=10)
+
+
 class AdminLogin(BaseModel):
     username: str
     password: str

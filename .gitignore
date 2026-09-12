@@ -10,6 +10,9 @@ node_modules/
 dist/
 build/
 uploads/
+models/**
+!models/README.md
+!models/.gitkeep
 *.log
 .pytest_cache/
 .coverage
