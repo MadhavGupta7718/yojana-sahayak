@@ -311,6 +311,164 @@ def trigger_crawl(
     }
 
 
+@router.post("/sources/{source_id}/crawl-exclusive")
+def trigger_crawl_exclusive(
+    source_id: int,
+    db: Session = Depends(get_db),
+    admin: AdminUser = Depends(require_roles("superadmin", "reviewer")),
+):
+    """Pause schedule, cancel other active crawls, and queue only this source immediately."""
+    from datetime import datetime, timezone
+
+    from app.config import get_settings
+    from scraper.crawl_control import (
+        clear_queue,
+        control_status,
+        pause_schedule,
+        push_crawl_job,
+        request_abort_others,
+    )
+
+    now = datetime.now(timezone.utc)
+    settings = get_settings()
+
+    src = db.query(GovernmentSource).filter(GovernmentSource.id == source_id).first()
+    if not src:
+        raise HTTPException(404, "Source not found")
+    if not src.enabled:
+        raise HTTPException(400, "Source is disabled. Enable it after review, then crawl.")
+
+    crawlability = probe_crawlability(src.base_url, settings.crawler_user_agent)
+    src.robots_allowed = crawlability["robots_allowed"]
+    src.last_checked = now
+    if crawlability["verdict"] == "blocked":
+        src.status = "MANUAL/RESTRICTED"
+        write_audit(
+            db,
+            admin,
+            "trigger_crawl_exclusive_blocked",
+            "government_source",
+            source_id,
+            {"crawlability": crawlability},
+        )
+        db.commit()
+        return {
+            "status": "blocked",
+            "started": False,
+            "source_id": source_id,
+            "message": crawlability["summary"],
+            "crawlability": crawlability,
+        }
+    if crawlability["verdict"] == "allowed":
+        src.status = "ACTIVE"
+    else:
+        src.status = "WARNING"
+
+    # Cancel every other active crawl (and any previous run for this source)
+    others = (
+        db.query(ScrapingRun)
+        .filter(
+            ScrapingRun.status.in_(("queued", "running")),
+            ScrapingRun.end_time.is_(None),
+        )
+        .all()
+    )
+    paused_ids = []
+    for run in others:
+        run.status = "cancelled"
+        run.end_time = now
+        run.notes = ((run.notes or "") + " | paused for exclusive crawl").strip(" |")
+        paused_ids.append(run.id)
+
+    run = ScrapingRun(
+        source_id=source_id,
+        status="queued",
+        notes="exclusive crawl — schedule paused; other crawls cancelled",
+    )
+    db.add(run)
+    db.flush()
+
+    try:
+        clear_queue(settings.redis_url)
+        pause_schedule(settings.redis_url, exclusive_run_id=run.id)
+        request_abort_others(settings.redis_url, keep_run_id=run.id)
+        push_crawl_job(settings.redis_url, source_id, run.id)
+    except Exception as exc:
+        run.status = "failed"
+        run.end_time = now
+        run.notes = ((run.notes or "") + f" | exclusive queue failed: {exc}").strip(" |")
+        db.commit()
+        raise HTTPException(500, f"Could not start exclusive crawl: {exc}") from exc
+
+    write_audit(
+        db,
+        admin,
+        "trigger_crawl_exclusive",
+        "government_source",
+        source_id,
+        {"run_id": run.id, "paused_runs": paused_ids, "crawlability": crawlability},
+    )
+    db.commit()
+    db.refresh(run)
+
+    status = control_status(settings.redis_url)
+    return {
+        "status": "queued",
+        "started": True,
+        "run_id": run.id,
+        "source_id": source_id,
+        "paused_runs": paused_ids,
+        "schedule_paused": True,
+        "control": status,
+        "message": (
+            f"Paused {len(paused_ids)} other crawl(s) and scheduled tick. "
+            f"Exclusive crawl queued as run #{run.id}. "
+            "Use Resume schedule when finished if you want periodic crawls again."
+        ),
+        "crawlability": crawlability,
+    }
+
+
+@router.post("/crawls/resume-schedule")
+def resume_crawl_schedule(
+    db: Session = Depends(get_db),
+    admin: AdminUser = Depends(require_roles("superadmin", "reviewer")),
+):
+    """Re-enable the scraper schedule after an exclusive crawl pause."""
+    from app.config import get_settings
+    from scraper.crawl_control import control_status, resume_schedule
+
+    settings = get_settings()
+    try:
+        resume_schedule(settings.redis_url)
+    except Exception as exc:
+        raise HTTPException(500, f"Could not resume schedule: {exc}") from exc
+
+    write_audit(db, admin, "resume_crawl_schedule", "scraping_run", details={})
+    db.commit()
+    return {
+        "resumed": True,
+        "message": "Scraper schedule resumed. Periodic and queued crawls can run again.",
+        "control": control_status(settings.redis_url),
+    }
+
+
+@router.get("/crawls/control")
+def crawl_control_status(
+    db: Session = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin),
+):
+    from app.config import get_settings
+    from scraper.crawl_control import control_status
+
+    settings = get_settings()
+    try:
+        status = control_status(settings.redis_url)
+    except Exception as exc:
+        raise HTTPException(500, f"Could not read crawl control: {exc}") from exc
+    return status
+
+
 @router.post("/crawls/clear-stuck")
 def clear_stuck_crawls(
     db: Session = Depends(get_db),
@@ -342,6 +500,9 @@ def clear_stuck_crawls(
         settings = get_settings()
         r = redis.from_url(settings.redis_url, decode_responses=True)
         redis_cleared = int(r.delete("yojana:crawl_now") or 0)
+        from scraper.crawl_control import resume_schedule
+
+        resume_schedule(settings.redis_url)
         r.close()
     except Exception:
         redis_cleared = 0
@@ -389,6 +550,45 @@ def list_changes(
         }
         for c in rows
     ]
+
+
+@router.post("/changes/approve-all")
+def approve_all_changes(
+    db: Session = Depends(get_db),
+    admin: AdminUser = Depends(require_roles("superadmin", "reviewer")),
+):
+    """Approve every change currently waiting for review."""
+    from scraper.change_detection.promote import apply_change
+
+    pending = (
+        db.query(DataChange)
+        .filter(DataChange.status.in_(["pending_review", "detected"]))
+        .order_by(DataChange.id.asc())
+        .all()
+    )
+    approved_ids: list[int] = []
+    for change in pending:
+        apply_change(db, change, True, admin.id)
+        approved_ids.append(change.id)
+
+    write_audit(
+        db,
+        admin,
+        "approve_all_changes",
+        "data_change",
+        details={"count": len(approved_ids), "ids": approved_ids[:200]},
+    )
+    db.commit()
+    return {
+        "ok": True,
+        "approved": len(approved_ids),
+        "ids": approved_ids,
+        "message": (
+            f"Approved {len(approved_ids)} change(s)."
+            if approved_ids
+            else "No pending changes to approve."
+        ),
+    }
 
 
 @router.post("/changes/{change_id}/decide")

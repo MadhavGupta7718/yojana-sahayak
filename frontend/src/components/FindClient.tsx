@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { districtsForState, INDIA_STATES } from "@/data/indiaLocations";
 import { districtLabel } from "@/data/districtLabelsHi";
@@ -10,6 +10,7 @@ import {
   CATEGORY_OPTIONS,
   EDUCATION_STATUS_OPTIONS,
   EXISTING_LOAN_OPTIONS,
+  GENDER_OPTIONS,
   PROJECT_TYPE_OPTIONS,
   PURPOSE_OPTIONS,
   optLabel,
@@ -25,6 +26,20 @@ type Rec = {
   scheme_id: number;
   name: string;
   score: number;
+  rank?: number;
+  detail_level?: "full" | "summary";
+  suggestion?: string;
+  emi_estimate?: {
+    emi?: number | null;
+    total_interest?: number | null;
+    total_repayment?: number | null;
+    warnings?: string[];
+    error?: string;
+  } | null;
+  timeline?: { availability_type?: string | null; label?: string; valid_from?: string | null; valid_to?: string | null };
+  description?: string | null;
+  target_gender?: string | null;
+  target_gender_label?: string | null;
   why: { status: string; text: string }[];
   gaps?: { field: string; your_value: unknown; scheme_requires: unknown; message: string }[];
   blocking_reasons?: string[];
@@ -84,6 +99,7 @@ export default function FindClient({
   const [nearMisses, setNearMisses] = useState<Rec[]>([]);
   const [matchStatus, setMatchStatus] = useState<"matched" | "no_match" | null>(null);
   const [matchMessage, setMatchMessage] = useState<string | null>(null);
+  const [suggestion, setSuggestion] = useState<string | null>(null);
   const [selected, setSelected] = useState<Rec | null>(null);
   const [emi, setEmi] = useState<any>(null);
   const [partners, setPartners] = useState<any>(null);
@@ -94,9 +110,26 @@ export default function FindClient({
   const [autoAddress, setAutoAddress] = useState<string | null>(null);
   const [autoRegion, setAutoRegion] = useState<{ state?: string; district?: string }>({});
   const [locStatus, setLocStatus] = useState<string | null>(null);
+  const [partnerLinkFlash, setPartnerLinkFlash] = useState(false);
+  const partnerSectionRef = useRef<HTMLDivElement | null>(null);
+  const partnerLinkRef = useRef<HTMLParagraphElement | null>(null);
+
+  function focusPartnerSearch(r: Rec) {
+    setSelected(r);
+    setPartners(null);
+    setPartnerMode(null);
+    setMapCenter(null);
+    setPartnerLinkFlash(true);
+    window.setTimeout(() => {
+      partnerSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      partnerLinkRef.current?.focus?.();
+    }, 50);
+    window.setTimeout(() => setPartnerLinkFlash(false), 2600);
+  }
 
   const [form, setForm] = useState({
     age: "",
+    gender: "",
     category: "SC",
     state: "",
     district: "",
@@ -134,6 +167,7 @@ export default function FindClient({
     const errs: Record<string, string> = {};
     if (s === 0) {
       if (!form.age || Number(form.age) < 18 || Number(form.age) > 100) errs.age = "Enter a valid age (18–100).";
+      if (!form.gender) errs.gender = "Select gender.";
       if (!form.category) errs.category = "Select category.";
       if (!form.state.trim()) errs.state = "State is required.";
       if (!form.district.trim()) errs.district = "District is required.";
@@ -168,6 +202,7 @@ export default function FindClient({
     try {
       const body = {
         age: Number(form.age),
+        gender: form.gender,
         category: form.category,
         state: form.state,
         district: form.district,
@@ -184,6 +219,7 @@ export default function FindClient({
         near_misses?: Rec[];
         match_status?: "matched" | "no_match";
         message?: string | null;
+        suggestion?: string | null;
         disclaimer: string;
       }>("/api/v1/assessments/recommend", {
         method: "POST",
@@ -195,13 +231,18 @@ export default function FindClient({
       setNearMisses(misses);
       setMatchStatus(out.match_status || (matched.length ? "matched" : "no_match"));
       setMatchMessage(out.message || null);
+      setSuggestion(out.suggestion || matched[0]?.suggestion || null);
       const first = matched[0] || misses[0] || null;
       setSelected(first);
       setPartners(null);
       setPartnerMode(null);
       setMapCenter(null);
       setEmi(null);
-      if (first && matched.length) await calcEmi(first);
+      if (first?.emi_estimate?.emi != null) {
+        setEmi(first.emi_estimate as { emi: number; total_interest: number; total_repayment: number });
+      } else if (first && matched.length) {
+        await calcEmi(first);
+      }
       setStep(3);
     } catch {
       setError(messages.error);
@@ -464,6 +505,18 @@ export default function FindClient({
             {fieldErrors.age && <p className="field-error">{fieldErrors.age}</p>}
           </div>
           <div>
+            <label className="label">{messages.gender} *</label>
+            <select className="select" value={form.gender} onChange={(e) => update("gender", e.target.value)} required>
+              <option value="">{messages.selectGender || "Select gender"}</option>
+              {GENDER_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {optLabel(o, locale)}
+                </option>
+              ))}
+            </select>
+            {fieldErrors.gender && <p className="field-error">{fieldErrors.gender}</p>}
+          </div>
+          <div>
             <label className="label">{messages.category} *</label>
             <select className="select" value={form.category} onChange={(e) => update("category", e.target.value)}>
               {CATEGORY_OPTIONS.map((o) => (
@@ -623,32 +676,147 @@ export default function FindClient({
           </div>
 
           {matchStatus === "matched" && (
-            <div className="scheme-list">
-              {recs.map((r, idx) => (
-                <button
-                  key={r.scheme_id}
-                  type="button"
-                  className={`scheme-card ${selected?.scheme_id === r.scheme_id ? "is-selected" : ""}`}
-                  onClick={() => {
-                    setSelected(r);
-                    calcEmi(r);
-                    setPartners(null);
-                    setPartnerMode(null);
-                    setMapCenter(null);
-                  }}
-                >
-                  <div className="scheme-card__top">
-                    <span className="scheme-rank">Option {idx + 1}</span>
-                    <span className="scheme-match">Match score {r.score}</span>
+            <div className="space-y">
+              <p className="text-sm text-muted" style={{ margin: 0 }}>
+                Up to 10 best matches. The top 3 are shown in full below (match reasons + EMI). Options 4–10 are
+                summarized.
+              </p>
+
+              {recs.slice(0, 3).map((r) => {
+                const emiRow = r.emi_estimate;
+                return (
+                  <div
+                    key={`detail-${r.scheme_id}`}
+                    className={`panel space-y result-detail ${selected?.scheme_id === r.scheme_id ? "is-selected" : ""}`}
+                    style={selected?.scheme_id === r.scheme_id ? { outline: "2px solid var(--lime, #b8f25a)" } : undefined}
+                  >
+                    <div className="scheme-card__top" style={{ marginBottom: "0.5rem" }}>
+                      <span className="scheme-rank">Option {r.rank || ""} · detailed</span>
+                      <span className="scheme-match">Match score {r.score}</span>
+                    </div>
+                    <div>
+                      <h3 className="font-display text-navy" style={{ marginTop: 0 }}>{r.name}</h3>
+                      <p className="text-sm" style={{ color: "var(--green)" }}>{messages.noGuarantee}</p>
+                      {r.description ? <p className="text-sm text-muted">{r.description}</p> : null}
+                    </div>
+
+                    <section>
+                      <h4>Why this scheme?</h4>
+                      <ul className="why-list">
+                        {(r.why || []).map((w, i) => (
+                          <li key={i} className={`why-${w.status}`}>
+                            <strong>
+                              {w.status === "pass" ? "Match" : w.status === "warning" ? "Need more info" : "Does not match"}:
+                            </strong>{" "}
+                            {w.text}
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+
+                    <section>
+                      <h4>Key scheme facts</h4>
+                      <div className="fact-grid">
+                        <div><span>Maximum loan</span><strong>{money(r.max_loan)}</strong></div>
+                        <div><span>Interest rate (estimated)</span><strong>{r.interest_rate != null ? `${r.interest_rate}%` : "Not published"}</strong></div>
+                        <div><span>Repayment tenure</span><strong>{r.tenure != null ? `${r.tenure} months` : "Not published"}</strong></div>
+                        <div><span>Moratorium</span><strong>{r.moratorium != null ? `${r.moratorium} months` : "Not published"}</strong></div>
+                        <div><span>Income limit</span><strong>{money(r.max_income)}</strong></div>
+                        <div><span>Timeline</span><strong>{r.timeline?.label || "NA"}</strong></div>
+                        <div><span>Best suited for</span><strong>{r.target_gender_label || "Both"}</strong></div>
+                        <div><span>Data freshness</span><strong>{r.freshness}</strong></div>
+                      </div>
+                    </section>
+
+                    <section>
+                      <h4>{messages.calculator}</h4>
+                      <p className="text-sm text-muted" style={{ marginTop: "-0.35rem" }}>
+                        {messages.estimated} values only — confirm with the channel partner.
+                      </p>
+                      {r.interest_rate == null || r.tenure == null ? (
+                        <p className="text-muted">{messages.notAvailable}</p>
+                      ) : emiRow?.emi != null ? (
+                        <div className="fact-grid">
+                          <div><span>Estimated EMI</span><strong>₹{Number(emiRow.emi).toLocaleString("en-IN")}</strong></div>
+                          <div><span>Total interest</span><strong>₹{Number(emiRow.total_interest).toLocaleString("en-IN")}</strong></div>
+                          <div><span>Total repayment</span><strong>₹{Number(emiRow.total_repayment).toLocaleString("en-IN")}</strong></div>
+                        </div>
+                      ) : (
+                        <p className="text-muted">{emiRow?.warnings?.[0] || messages.notAvailable}</p>
+                      )}
+                    </section>
+
+                    <section>
+                      <h4>{messages.documents}</h4>
+                      {r.required_documents?.length ? (
+                        <ul className="doc-list">
+                          {r.required_documents.map((d) => (
+                            <li key={d}>{d}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="text-muted">Document list is not available from the official source yet. Confirm with the channel partner.</p>
+                      )}
+                    </section>
+
+                    <div className="admin-actions" style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={() => focusPartnerSearch(r)}
+                      >
+                        Find channel partner for this scheme
+                      </button>
+                      {r.source_url ? (
+                        <a className="source-link" href={r.source_url} target="_blank" rel="noreferrer">
+                          Open official source
+                        </a>
+                      ) : null}
+                    </div>
                   </div>
-                  <h3>{r.name}</h3>
-                  <div className="scheme-facts">
-                    <span>Max loan: {money(r.max_loan)}</span>
-                    <span>Interest: {r.interest_rate != null ? `${r.interest_rate}%` : "Not published"}</span>
-                    <span>Tenure: {r.tenure != null ? `${r.tenure} months` : "Not published"}</span>
-                  </div>
-                </button>
-              ))}
+                );
+              })}
+
+              {recs.length > 3 && (
+                <div className="scheme-list">
+                  <h3 className="font-display text-navy" style={{ marginBottom: 0 }}>More matches (4–{recs.length})</h3>
+                  {recs.slice(3).map((r, idx) => (
+                    <button
+                      key={r.scheme_id}
+                      type="button"
+                      className={`scheme-card ${selected?.scheme_id === r.scheme_id ? "is-selected" : ""}`}
+                      onClick={() => {
+                        setSelected(r);
+                        setPartners(null);
+                        setPartnerMode(null);
+                        setMapCenter(null);
+                      }}
+                    >
+                      <div className="scheme-card__top">
+                        <span className="scheme-rank">Option {r.rank || idx + 4}</span>
+                        <span className="scheme-match">Match score {r.score}</span>
+                      </div>
+                      <h3>{r.name}</h3>
+                      <div className="scheme-facts">
+                        <span>Max loan: {money(r.max_loan)}</span>
+                        <span>Interest: {r.interest_rate != null ? `${r.interest_rate}%` : "Not published"}</span>
+                        <span>Tenure: {r.tenure != null ? `${r.tenure} months` : "Not published"}</span>
+                        <span>Timeline: {r.timeline?.label || "NA"}</span>
+                        <span>For: {r.target_gender_label || "Both"}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {suggestion && (
+                <div className="panel" style={{ borderLeft: "4px solid var(--lime, #b8f25a)" }}>
+                  <h3 className="font-display" style={{ marginTop: 0, fontSize: "1.1rem" }}>
+                    Suggestion for your best match
+                  </h3>
+                  <p className="text-sm" style={{ marginBottom: 0 }}>{suggestion}</p>
+                </div>
+              )}
             </div>
           )}
 
@@ -691,6 +859,8 @@ export default function FindClient({
 
           {selected && (
             <div className="panel space-y result-detail">
+              {matchStatus !== "matched" ? (
+                <>
               <div>
                 <h3 className="font-display text-navy" style={{ marginTop: 0 }}>{selected.name}</h3>
                 {selected.eligible === false || matchStatus === "no_match" ? (
@@ -736,10 +906,30 @@ export default function FindClient({
                   <div><span>Repayment tenure</span><strong>{selected.tenure != null ? `${selected.tenure} months` : "Not published"}</strong></div>
                   <div><span>Moratorium</span><strong>{selected.moratorium != null ? `${selected.moratorium} months` : "Not published"}</strong></div>
                   <div><span>Income limit</span><strong>{money(selected.max_income)}</strong></div>
+                  <div><span>Timeline</span><strong>{selected.timeline?.label || "NA"}</strong></div>
+                  <div><span>Best suited for</span><strong>{selected.target_gender_label || "Both"}</strong></div>
                   <div><span>Data freshness</span><strong>{selected.freshness}</strong></div>
                 </div>
               </section>
+                </>
+              ) : (
+                <div ref={partnerSectionRef} id="find-channel-partner">
+                  <h3 className="font-display text-navy" style={{ marginTop: 0 }}>
+                    {messages.findPartner}: {selected.name}
+                  </h3>
+                  <p
+                    ref={partnerLinkRef}
+                    tabIndex={-1}
+                    className={`text-sm text-muted ys-partner-link-note${partnerLinkFlash ? " ys-partner-link-note--flash" : ""}`}
+                  >
+                    Partner search is linked to the scheme you selected above (Option {selected.rank || 1}).
+                  </p>
+                </div>
+              )}
 
+              {matchStatus !== "matched" && (
+              <>
+              {selected.rank != null && selected.rank <= 3 && matchStatus === "matched" ? (
               <section>
                 <h4>{messages.calculator}</h4>
                 <p className="text-sm text-muted" style={{ marginTop: "-0.35rem" }}>
@@ -761,6 +951,17 @@ export default function FindClient({
                   </button>
                 )}
               </section>
+              ) : matchStatus === "matched" ? (
+                <section>
+                  <h4>{messages.calculator}</h4>
+                  <p className="text-muted">Open one of the top 3 matches for a detailed EMI estimate.</p>
+                </section>
+              ) : (
+              <section>
+                <h4>{messages.calculator}</h4>
+                <p className="text-muted">EMI estimate is shown only for schemes you appear eligible for.</p>
+              </section>
+              )}
 
               <section>
                 <h4>{messages.documents}</h4>
@@ -813,6 +1014,8 @@ export default function FindClient({
                   <p className="text-sm text-muted mt-2">Open the main official source above to verify scheme details.</p>
                 )}
               </section>
+              </>
+              )}
 
               {matchStatus === "matched" && selected.eligible !== false ? (
               <section>

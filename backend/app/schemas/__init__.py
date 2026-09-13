@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 class ProfileInput(BaseModel):
     age: int = Field(..., ge=18, le=100)
+    gender: str = Field(..., min_length=1)  # male | female | prefer_not_to_say
     category: str = Field(..., min_length=1)
     annual_family_income: float = Field(..., ge=0)
     occupation: Optional[str] = None

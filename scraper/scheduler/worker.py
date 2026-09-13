@@ -18,6 +18,7 @@ from app.config import get_settings
 from app.database.session import SessionLocal
 from app.models import GovernmentSource, ScrapingRun
 from app.seed import seed
+from scraper.crawl_control import CRAWL_QUEUE_KEY, is_schedule_paused
 from scraper.spiders.http_crawler import SourceCrawler
 
 logging.basicConfig(level=logging.INFO)
@@ -25,8 +26,6 @@ logging.basicConfig(level=logging.INFO)
 # WARNING-spam "maximum number of running instances reached". That is expected.
 logging.getLogger("apscheduler").setLevel(logging.ERROR)
 logger = logging.getLogger("scraper.scheduler")
-
-CRAWL_QUEUE_KEY = "yojana:crawl_now"
 
 
 def due_sources(db) -> list[GovernmentSource]:
@@ -92,6 +91,14 @@ def run_source_crawl(source_id: int, reason: str = "scheduled", run_id: int | No
 
 
 def tick() -> None:
+    settings = get_settings()
+    try:
+        if is_schedule_paused(settings.redis_url):
+            logger.info("Scheduled crawl tick skipped — schedule is paused for exclusive crawl")
+            return
+    except Exception:
+        logger.exception("Could not read schedule pause flag")
+
     db = SessionLocal()
     try:
         for source in due_sources(db):

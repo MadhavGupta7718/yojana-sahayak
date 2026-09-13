@@ -1,4 +1,4 @@
-"""Constrained discovery of additional official government sources."""
+"""Constrained discovery of additional scheme sources (any domain; admin approval)."""
 
 from __future__ import annotations
 
@@ -15,6 +15,9 @@ KEYWORDS = [
     "government concessional loan",
     "channelizing agency",
     "social justice loan scheme",
+    "scheme",
+    "loan",
+    "finance",
 ]
 
 
@@ -25,18 +28,30 @@ def is_government_domain(url: str) -> bool:
     ) or host.endswith("nic.in")
 
 
+def is_allowed_source_domain(url: str) -> bool:
+    """Any http(s) host is allowed; discovery still requires admin enable."""
+    parsed = urlparse(url)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
 def authority_relevance_score(url: str, title: str = "", snippet: str = "") -> tuple[int, str]:
     """Return (score, reason). Does NOT auto-enable sources."""
-    if not is_government_domain(url):
-        return 0, "Rejected: not a government domain"
+    if not is_allowed_source_domain(url):
+        return 0, "Rejected: URL must be http(s) with a host"
     text = f"{url} {title} {snippet}".lower()
     hits = [k for k in KEYWORDS if k.lower() in text]
-    score = 40 + 10 * len(hits)
+    score = 25 + 8 * len(hits)
+    if is_government_domain(url):
+        score += 25
     if "nsfdc" in text:
         score += 20
     if "socialjustice" in text or "social justice" in text:
         score += 15
-    return min(score, 100), f"Candidate government source; keyword hits={hits}. Requires admin approval."
+    return min(score, 100), (
+        f"Candidate source; keyword hits={hits}. "
+        f"{'Government domain.' if is_government_domain(url) else 'Non-government domain — verify before enabling.'} "
+        "Requires admin approval."
+    )
 
 
 def propose_source(url: str, title: str = "", organization: str = "") -> dict:
@@ -44,7 +59,7 @@ def propose_source(url: str, title: str = "", organization: str = "") -> dict:
     return {
         "base_url": url,
         "source_name": title or urlparse(url).netloc,
-        "organization": organization or "Unknown government organization",
+        "organization": organization or "Unknown organization",
         "source_type": "discovered",
         "authority_level": score,
         "enabled": False,

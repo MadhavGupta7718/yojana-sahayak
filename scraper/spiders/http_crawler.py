@@ -14,7 +14,11 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.models import GovernmentSource, RawDocument, ScrapingError, ScrapingRun, StagingRecord
 from scraper.change_detection.promote import promote_staging
-from scraper.extractors.facts import extract_partner_categories, extract_partners, extract_scheme_fields
+from scraper.extractors.facts import (
+    extract_document_schemes,
+    extract_partner_categories,
+    extract_partners,
+)
 from scraper.extractors.normalize import canonical_key, content_hash
 from scraper.extractors.nsfdc import extract_nsfdc_eligibility, extract_nsfdc_schemes
 from scraper.parsers.content import extract_links, extract_pdf_text, html_title, html_to_text
@@ -123,6 +127,11 @@ class SourceCrawler:
 
             with httpx.Client(timeout=30.0, follow_redirects=True, headers={"User-Agent": self.ua}) as client:
                 while queue and len(visited) < 80:
+                    if self._should_abort():
+                        self.run.status = "cancelled"
+                        self.run.notes = ((self.run.notes or "") + " | cancelled for exclusive crawl").strip(" |")
+                        self.db.commit()
+                        return self.run
                     url = queue.pop(0)
                     if url in visited:
                         continue
@@ -146,7 +155,25 @@ class SourceCrawler:
         finally:
             self.run.end_time = datetime.now(timezone.utc)
             self.db.commit()
+            self._clear_abort_if_exclusive_finished()
         return self.run
+
+    def _should_abort(self) -> bool:
+        try:
+            from scraper.crawl_control import should_abort_run
+
+            return should_abort_run(self.settings.redis_url, self.run.id if self.run else None)
+        except Exception:
+            return False
+
+    def _clear_abort_if_exclusive_finished(self) -> None:
+        """If this run was the exclusive keep-run, clear abort flag so future crawls work."""
+        try:
+            from scraper.crawl_control import clear_exclusive_abort_if_match
+
+            clear_exclusive_abort_if_match(self.settings.redis_url, self.run.id if self.run else None)
+        except Exception:
+            pass
 
     def _refresh_partner_scheme_mappings(self) -> None:
         from app.models import Partner, PartnerSchemeMapping, Scheme
@@ -327,36 +354,57 @@ class SourceCrawler:
             staged_any = True
 
         if not staged_any:
-            # Generic fallback — skip pure navigation homepages
+            # Generic multi-scheme extraction for any published scheme page/PDF
             title_l = (title or "").lower()
-            if "home" not in title_l and (
-                any(k in url.lower() for k in ["scheme", "loan", "finance", "lending", "eligib"])
-            ):
-                scheme_data = extract_scheme_fields(text, title, url)
-                payload = scheme_data["payload"]
-                if any(
-                    k in (payload.get("name") or "").lower()
-                    for k in ["scheme", "loan", "finance", "credit", "micro", "yojana"]
-                ):
-                    staging = StagingRecord(
-                        source_id=self.source.id,
-                        raw_document_id=raw.id,
-                        entity_type="scheme",
-                        entity_key=payload.get("canonical_key") or canonical_key(payload.get("name") or url),
-                        payload=payload,
-                        original_text=scheme_data.get("original_text"),
-                        confidence=0.55,
-                        status="pending",
-                        source_url=url,
-                    )
-                    self.db.add(staging)
-                    self.db.flush()
-                    changes = promote_staging(self.db, staging)
-                    self.run.changes_detected += len(changes)
+            url_l_check = url.lower()
+            looks_like_schemes = (
+                "scheme name:" in text.lower()
+                or any(k in url_l_check for k in ["scheme", "loan", "finance", "lending", "eligib", "yojana", "credit"])
+                or any(k in title_l for k in ["scheme", "loan", "finance", "credit", "yojana"])
+            )
+            if "home" not in title_l or "scheme name:" in text.lower():
+                if looks_like_schemes:
+                    for scheme_data in extract_document_schemes(text, title, url):
+                        payload = scheme_data["payload"]
+                        if not any(
+                            k in (payload.get("name") or "").lower()
+                            for k in ["scheme", "loan", "finance", "credit", "micro", "yojana", "udyami", "udyam", "shiksha"]
+                        ):
+                            continue
+                        staging = StagingRecord(
+                            source_id=self.source.id,
+                            raw_document_id=raw.id,
+                            entity_type="scheme",
+                            entity_key=payload.get("canonical_key") or canonical_key(payload.get("name") or url),
+                            payload=payload,
+                            original_text=scheme_data.get("original_text"),
+                            confidence=0.7,
+                            status="pending",
+                            source_url=url,
+                        )
+                        self.db.add(staging)
+                        self.db.flush()
+                        changes = promote_staging(self.db, staging)
+                        self.run.changes_detected += len(changes)
+                        staged_any = True
+                        for partner in scheme_data.get("partners") or []:
+                            pst = StagingRecord(
+                                source_id=self.source.id,
+                                raw_document_id=raw.id,
+                                entity_type="partner",
+                                entity_key=partner["canonical_key"],
+                                payload=partner,
+                                original_text={"name": partner["name"]},
+                                confidence=0.75,
+                                status="pending",
+                                source_url=url,
+                            )
+                            self.db.add(pst)
+                            self.db.flush()
+                            self.run.changes_detected += len(promote_staging(self.db, pst))
 
         # Partner extraction: require partner-page URL or explicit partner cue (word-boundary for SCA)
         url_l = url.lower()
-        text_l = text.lower()
         partner_url = any(
             k in url_l
             for k in (
@@ -373,23 +421,26 @@ class SourceCrawler:
         )
         blocked_url = any(b in url_l for b in ("career", "recruit", "interview", "vacancy", "/hr", "pratibha"))
         if (partner_url or partner_text) and not blocked_url:
-            partner_payloads = extract_partners(text, url) + extract_partner_categories(text, url)
-            for partner in partner_payloads:
-                staging = StagingRecord(
-                    source_id=self.source.id,
-                    raw_document_id=raw.id,
-                    entity_type="partner",
-                    entity_key=partner["canonical_key"],
-                    payload=partner,
-                    original_text={"name": partner["name"]},
-                    confidence=0.5,
-                    status="pending",
-                    source_url=url,
-                )
-                self.db.add(staging)
-                self.db.flush()
-                changes = promote_staging(self.db, staging)
-                self.run.changes_detected += len(changes)
+            # Skip if this page already promoted structured per-scheme partners
+            already_structured = staged_any and "channel partner name:" in text.lower()
+            if not already_structured:
+                partner_payloads = extract_partners(text, url) + extract_partner_categories(text, url)
+                for partner in partner_payloads:
+                    staging = StagingRecord(
+                        source_id=self.source.id,
+                        raw_document_id=raw.id,
+                        entity_type="partner",
+                        entity_key=partner["canonical_key"],
+                        payload=partner,
+                        original_text={"name": partner["name"]},
+                        confidence=0.5,
+                        status="pending",
+                        source_url=url,
+                    )
+                    self.db.add(staging)
+                    self.db.flush()
+                    changes = promote_staging(self.db, staging)
+                    self.run.changes_detected += len(changes)
 
         self.db.commit()
 

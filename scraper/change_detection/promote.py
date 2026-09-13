@@ -11,6 +11,7 @@ from app.models import (
     ApprovalRule,
     DataChange,
     Partner,
+    PartnerSchemeMapping,
     Scheme,
     SchemeEligibilityRule,
     SchemeVersion,
@@ -43,6 +44,20 @@ def _is_sensitive(db: Session, field_name: str) -> tuple[bool, bool]:
     return field_name in SENSITIVE_DEFAULT, field_name not in SENSITIVE_DEFAULT
 
 
+def _parse_iso_dt(value: Any) -> Optional[datetime]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
 def _scheme_snapshot(scheme: Scheme) -> dict[str, Any]:
     return {
         "name": scheme.name,
@@ -62,6 +77,10 @@ def _scheme_snapshot(scheme: Scheme) -> dict[str, Any]:
         "eligible_activities": scheme.eligible_activities,
         "required_documents": scheme.required_documents,
         "application_process": scheme.application_process,
+        "availability_type": getattr(scheme, "availability_type", None),
+        "valid_from": scheme.valid_from.isoformat() if getattr(scheme, "valid_from", None) else None,
+        "valid_to": scheme.valid_to.isoformat() if getattr(scheme, "valid_to", None) else None,
+        "target_gender": getattr(scheme, "target_gender", None) or "any",
         "source_url": scheme.source_url,
         "status": scheme.status,
     }
@@ -115,6 +134,8 @@ def _promote_scheme(db: Session, staging: StagingRecord, payload: dict, now: dat
             "eligible_activities",
             "required_documents",
             "application_process",
+            "availability_type",
+            "target_gender",
         ]:
             if field in payload and payload[field] is not None:
                 sensitive, auto = _is_sensitive(db, field)
@@ -153,6 +174,15 @@ def _promote_scheme(db: Session, staging: StagingRecord, payload: dict, now: dat
                     )
                     db.add(ch)
                     changes.append(ch)
+
+        if "valid_from" in payload:
+            scheme.valid_from = _parse_iso_dt(payload.get("valid_from"))
+        if "valid_to" in payload:
+            scheme.valid_to = _parse_iso_dt(payload.get("valid_to"))
+        if payload.get("target_gender"):
+            scheme.target_gender = payload["target_gender"]
+        elif not scheme.target_gender:
+            scheme.target_gender = "any"
 
         db.add(scheme)
         db.flush()
@@ -202,10 +232,12 @@ def _promote_scheme(db: Session, staging: StagingRecord, payload: dict, now: dat
                 if status == "auto_approved":
                     scheme.description = new_val
             continue
+        if field in {"valid_from", "valid_to"}:
+            new_val = _parse_iso_dt(new_val)
         if not hasattr(scheme, field):
             continue
         old_val = getattr(scheme, field)
-        if new_val is None:
+        if new_val is None and field not in {"valid_from", "valid_to", "availability_type"}:
             continue
         if _values_equal(old_val, new_val):
             continue
@@ -306,10 +338,22 @@ def _promote_partner(db: Session, staging: StagingRecord, payload: dict, now: da
         )
         db.add(ch)
         changes.append(ch)
+        _link_partner_scheme(db, partner, payload)
         staging.status = "promoted"
         return changes
 
-    for field in ["phone", "email", "address", "website", "state", "district", "status"]:
+    for field in [
+        "phone",
+        "email",
+        "address",
+        "website",
+        "state",
+        "district",
+        "status",
+        "organization",
+        "latitude",
+        "longitude",
+    ]:
         if field in payload and payload[field] is not None and getattr(partner, field) != payload[field]:
             sensitive, auto = _is_sensitive(db, field)
             status = "auto_approved" if auto or not sensitive else "pending_review"
@@ -331,8 +375,37 @@ def _promote_partner(db: Session, staging: StagingRecord, payload: dict, now: da
             if status == "auto_approved":
                 setattr(partner, field, payload[field])
     partner.last_verified = now
+    _link_partner_scheme(db, partner, payload)
     staging.status = "promoted"
     return changes
+
+
+def _link_partner_scheme(db: Session, partner: Partner, payload: dict) -> None:
+    scheme_key = payload.get("linked_scheme_key")
+    if not scheme_key:
+        return
+    scheme = db.query(Scheme).filter(Scheme.canonical_key == scheme_key).first()
+    if not scheme:
+        return
+    existing = (
+        db.query(PartnerSchemeMapping)
+        .filter(
+            PartnerSchemeMapping.partner_id == partner.id,
+            PartnerSchemeMapping.scheme_id == scheme.id,
+        )
+        .first()
+    )
+    if existing:
+        return
+    db.add(
+        PartnerSchemeMapping(
+            partner_id=partner.id,
+            scheme_id=scheme.id,
+            eligibility_status="eligible",
+            source_id=partner.source_id,
+            last_verified=datetime.now(timezone.utc),
+        )
+    )
 
 
 def apply_change(db: Session, change: DataChange, approve: bool, admin_id: int) -> None:

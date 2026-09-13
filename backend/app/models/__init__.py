@@ -50,6 +50,7 @@ class UserProfile(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     age: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    gender: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # male | female | prefer_not_to_say
     category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     annual_family_income: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     occupation: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -86,6 +87,10 @@ class Scheme(Base, TimestampMixin):
     eligible_activities: Mapped[Optional[Any]] = mapped_column(JSONB, nullable=True)
     required_documents: Mapped[Optional[Any]] = mapped_column(JSONB, nullable=True)
     application_process: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    availability_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # lifetime | period
+    valid_from: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_to: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    target_gender: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, default="any")  # male | female | any
     source_id: Mapped[Optional[int]] = mapped_column(ForeignKey("government_sources.id"), nullable=True)
     source_url: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
     last_verified: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

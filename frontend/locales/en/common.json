@@ -45,6 +45,8 @@
   "back": "Back",
   "next": "Next",
   "age": "Age",
+  "gender": "Gender",
+  "selectGender": "Select gender",
   "category": "Category",
   "state": "State",
   "district": "District",

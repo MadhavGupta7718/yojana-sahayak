@@ -62,6 +62,23 @@ def extract_pdf_text(path_or_bytes) -> str:
     if text and len(text.strip()) > 40:
         return text
 
+    # Lightweight fallback used when pdfplumber is unavailable
+    try:
+        from pypdf import PdfReader
+        import io
+
+        reader = (
+            PdfReader(io.BytesIO(path_or_bytes))
+            if isinstance(path_or_bytes, (bytes, bytearray))
+            else PdfReader(path_or_bytes)
+        )
+        parts = [(page.extract_text() or "") for page in reader.pages]
+        text = "\n".join(parts)
+        if text and len(text.strip()) > 40:
+            return text
+    except Exception:
+        pass
+
     # OCR fallback for scanned PDFs
     try:
         import fitz  # PyMuPDF

@@ -56,6 +56,7 @@ def _get_profile_value(profile: dict[str, Any], rule_type: str) -> Any:
         "annual_family_income": "annual_family_income",
         "category": "category",
         "age": "age",
+        "gender": "gender",
         "project_type": "project_type",
         "project_cost": "project_cost",
         "loan_amount": "loan_required",
@@ -137,6 +138,14 @@ def _compare(actual: Any, operator: str, expected: Any) -> bool:
         actual_set = {str(actual).lower()} if not isinstance(actual, list) else {str(a).lower() for a in actual}
         expected_set = {str(e).lower() for e in (expected if isinstance(expected, list) else [expected])}
         return bool(actual_set & expected_set)
+    if op == "gender_match":
+        user_g = str(actual or "").strip().lower()
+        target = str(expected or "any").strip().lower() or "any"
+        if target in {"any", "both", "all", ""}:
+            return True
+        if user_g in {"prefer_not_to_say", "prefer-not-to-say", "na", ""}:
+            return True
+        return user_g == target
     return False
 
 

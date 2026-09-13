@@ -65,6 +65,7 @@ export default function AdminPage() {
     Record<number, "idle" | "checking" | "running" | "finished" | "blocked" | "error">
   >({});
   const [crawlNote, setCrawlNote] = useState<Record<number, string>>({});
+  const [schedulePaused, setSchedulePaused] = useState(false);
   const [sourceForm, setSourceForm] = useState(EMPTY_SOURCE_FORM);
   const [addingSource, setAddingSource] = useState(false);
 
@@ -154,13 +155,14 @@ export default function AdminPage() {
     if (!token) return;
     setBusy(true);
     try {
-      const [o, s, c, r, sch, p] = await Promise.all([
+      const [o, s, c, r, sch, p, ctrl] = await Promise.all([
         adminFetch("/api/v1/admin/overview"),
         adminFetch("/api/v1/admin/sources"),
         adminFetch("/api/v1/admin/changes?status=pending_review"),
         adminFetch("/api/v1/admin/runs"),
         adminFetch("/api/v1/admin/schemes"),
         adminFetch("/api/v1/admin/partners"),
+        adminFetch("/api/v1/admin/crawls/control").catch(() => ({ schedule_paused: false })),
       ]);
       setOverview(o);
       setSources(s);
@@ -168,6 +170,7 @@ export default function AdminPage() {
       setRuns(r);
       setSchemes(sch);
       setPartners(p);
+      setSchedulePaused(Boolean(ctrl?.schedule_paused));
       setError(null);
       return { runs: r as any[], sources: s as any[] };
     } catch (err: any) {
@@ -192,6 +195,29 @@ export default function AdminPage() {
     refresh();
   }
 
+  async function approveAllChanges() {
+    setError(null);
+    setNotice(null);
+    if (!changes.length) {
+      setNotice("No pending changes to approve.");
+      return;
+    }
+    if (
+      !window.confirm(
+        `Approve all ${changes.length} pending change(s)? This applies them to the live scheme/partner data.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      const out = await adminFetch("/api/v1/admin/changes/approve-all", { method: "POST" });
+      setNotice(out.message || `Approved ${out.approved || 0} change(s).`);
+      refresh();
+    } catch (err: any) {
+      setError(err.message || "Could not approve all changes");
+    }
+  }
+
   async function clearStuckCrawls() {
     setError(null);
     setNotice(null);
@@ -199,13 +225,56 @@ export default function AdminPage() {
       const out = await adminFetch("/api/v1/admin/crawls/clear-stuck", { method: "POST" });
       setCrawlBtn({});
       setCrawlNote({});
+      setSchedulePaused(false);
       setNotice(
         out.cleared
-          ? `Cleared ${out.cleared} stuck crawl(s). You can start a new crawl now.`
-          : "No stuck crawls found.",
+          ? `Cleared ${out.cleared} stuck crawl(s). Schedule resumed. You can start a new crawl now.`
+          : "No stuck crawls found. Schedule resumed.",
       );
+      refresh();
     } catch (err: any) {
       setError(err.message || "Could not clear stuck crawls");
+    }
+  }
+
+  async function resumeSchedule() {
+    setError(null);
+    setNotice(null);
+    try {
+      const out = await adminFetch("/api/v1/admin/crawls/resume-schedule", { method: "POST" });
+      setSchedulePaused(false);
+      setNotice(out.message || "Schedule resumed.");
+      refresh();
+    } catch (err: any) {
+      setError(err.message || "Could not resume schedule");
+    }
+  }
+
+  async function crawlExclusive(id: number) {
+    setError(null);
+    setNotice(null);
+    setTab("sources");
+    setSourceCrawl(id, "checking", "Pausing other crawls and checking site…");
+    try {
+      const out = await adminFetch(`/api/v1/admin/sources/${id}/crawl-exclusive`, { method: "POST" });
+      const checkLine = crawlabilityLine(out.crawlability);
+      if (out.started === false && out.status === "blocked") {
+        setSourceCrawl(id, "blocked", checkLine || out.message || "Crawl blocked.");
+        return;
+      }
+      setSchedulePaused(true);
+      const runHint = out.run_id ? ` Run #${out.run_id}.` : "";
+      setSourceCrawl(
+        id,
+        "running",
+        `${checkLine || "OK."} ${out.message || "Exclusive crawl queued."}${runHint}`,
+      );
+      setNotice(out.message || "Exclusive crawl started. Schedule is paused.");
+      refresh();
+    } catch (err: any) {
+      const msg = err?.message || "Failed to start exclusive crawl";
+      setSourceCrawl(id, "error", msg);
+      setError(msg);
     }
   }
 
@@ -419,16 +488,27 @@ export default function AdminPage() {
           <div className="admin-callout">
             <strong>Why some websites are disabled</strong>
             <p>
-              Only <em>verified</em> government sources stay enabled for crawling (NSFDC by default). Others such as
-              MoSJE, data.gov.in, or SCA placeholders start <strong>disabled</strong> until an admin checks robots.txt,
-              relevance, and authority — this avoids scraping the wrong sites or blocked portals. Use{" "}
-              <strong>Enable</strong> after review, or add a new official URL below.
+              Verified sources stay enabled for crawling (NSFDC by default). Other seeded portals start{" "}
+              <strong>disabled</strong> until an admin checks robots.txt, relevance, and authority. You can also
+              register any additional website URL below — leave it disabled until reviewed. Existing government
+              sources and scraped schemes are kept; new sources are additive.
             </p>
             <div className="admin-actions mt-3">
               <button className="btn btn-secondary" type="button" onClick={() => clearStuckCrawls()}>
                 Clear stuck crawls
               </button>
+              {schedulePaused && (
+                <button className="btn btn-primary" type="button" onClick={() => resumeSchedule()}>
+                  Resume schedule
+                </button>
+              )}
             </div>
+            {schedulePaused && (
+              <p className="admin-meta" style={{ marginTop: "0.75rem", marginBottom: 0 }}>
+                Scheduled crawls are paused (exclusive mode). Other crawls were cancelled. Click{" "}
+                <strong>Resume schedule</strong> when you want periodic crawls again.
+              </p>
+            )}
           </div>
 
           <form className="admin-row admin-add-source" onSubmit={addSource}>
@@ -436,7 +516,8 @@ export default function AdminPage() {
               Add website to crawl
             </h3>
             <p className="admin-meta" style={{ marginTop: 0, marginBottom: "0.85rem" }}>
-              Register another official .gov / .nic.in source. Leave “Enable for crawl” off until you have verified it.
+              Register any website URL to crawl (government or other published scheme portals). Leave “Enable for
+              crawl” off until you have verified it.
             </p>
             <div className="admin-form-grid">
               <div>
@@ -467,7 +548,7 @@ export default function AdminPage() {
                   type="url"
                   value={sourceForm.base_url}
                   onChange={(e) => setSourceForm((f) => ({ ...f, base_url: e.target.value }))}
-                  placeholder="https://example.gov.in/"
+                  placeholder="https://example.org/schemes/"
                 />
               </div>
               <div>
@@ -610,6 +691,19 @@ export default function AdminPage() {
                     >
                       {crawlLabel}
                     </button>
+                    <button
+                      className="btn btn-secondary"
+                      type="button"
+                      onClick={() => crawlExclusive(s.id)}
+                      disabled={!s.enabled || anyCrawlBusy}
+                      title={
+                        !s.enabled
+                          ? "Enable this source first"
+                          : "Cancel other crawls, pause schedule, and crawl only this source now"
+                      }
+                    >
+                      Pause others & crawl
+                    </button>
                   </div>
                 </div>
               </div>
@@ -620,6 +714,25 @@ export default function AdminPage() {
 
       {tab === "changes" && (
         <div className="admin-list">
+          <div className="admin-row admin-row__top" style={{ alignItems: "center" }}>
+            <div>
+              <div className="font-semibold">Pending changes ({changes.length})</div>
+              <p className="admin-meta" style={{ margin: "0.35rem 0 0" }}>
+                Review field updates from crawls, or approve everything in one step.
+              </p>
+            </div>
+            <div className="admin-actions">
+              <button
+                className="btn btn-primary"
+                type="button"
+                onClick={() => approveAllChanges()}
+                disabled={!changes.length}
+                title={changes.length ? "Approve every pending change" : "Nothing to approve"}
+              >
+                Approve all
+              </button>
+            </div>
+          </div>
           {changes.length === 0 && <p className="panel">No pending changes to review.</p>}
           {changes.map((c) => (
             <div key={c.id} className="admin-row">

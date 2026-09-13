@@ -9,7 +9,48 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.models import RankingWeights, Scheme, SchemeEligibilityRule, SourceCitation
 from app.rules.engine import evaluate_rule, is_eligible, purpose_compatible
+from app.services.finance import calculate_emi
 from app.services.freshness import freshness_state
+
+
+def _timeline_display(scheme: Scheme) -> dict[str, Any]:
+    atype = getattr(scheme, "availability_type", None)
+    vf = getattr(scheme, "valid_from", None)
+    vt = getattr(scheme, "valid_to", None)
+    if atype == "lifetime":
+        return {
+            "availability_type": "lifetime",
+            "valid_from": None,
+            "valid_to": None,
+            "label": "Lifetime",
+        }
+    if atype == "period" or vf or vt:
+        def _fmt(d):
+            if not d:
+                return "NA"
+            try:
+                return d.strftime("%d %b %Y")
+            except Exception:
+                return "NA"
+
+        start = _fmt(vf)
+        end = _fmt(vt)
+        if start == "NA" and end == "NA":
+            label = "NA"
+        else:
+            label = f"{start} to {end}"
+        return {
+            "availability_type": atype or "period",
+            "valid_from": vf.isoformat() if vf else None,
+            "valid_to": vt.isoformat() if vt else None,
+            "label": label,
+        }
+    return {
+        "availability_type": None,
+        "valid_from": None,
+        "valid_to": None,
+        "label": "NA",
+    }
 
 
 def _fmt_money(n: Any) -> str:
@@ -54,6 +95,13 @@ def _fail_reason(rule_type: str, actual: Any, expected: Any, operator: str) -> s
     if rule_type == "category":
         allowed = ", ".join(str(v) for v in (expected if isinstance(expected, list) else [expected]))
         return f"Your category ({actual}) is not in the allowed beneficiary categories ({allowed})."
+    if rule_type == "gender":
+        target = str(expected or "any").lower()
+        label = "women" if target == "female" else ("men" if target == "male" else "all genders")
+        return (
+            f"This scheme is published for {label} beneficiaries. "
+            f"Your selected gender ({actual}) does not match, so this scheme is not available for you."
+        )
     if rule_type == "age":
         return f"Your age ({actual}) does not meet the published age condition for this scheme."
     if rule_type == "project_type":
@@ -179,6 +227,19 @@ def _rules_from_scheme(scheme: Scheme) -> list[dict[str, Any]]:
                     "is_hard": True,
                 }
             )
+
+    target_gender = (getattr(scheme, "target_gender", None) or "any").strip().lower() or "any"
+    if target_gender not in {"any", "both", "all"}:
+        gender_label = "women" if target_gender == "female" else "men"
+        rules.append(
+            {
+                "rule_type": "gender",
+                "operator": "gender_match",
+                "value": target_gender,
+                "description": f"This scheme is published for {gender_label} beneficiaries and matches your gender.",
+                "is_hard": True,
+            }
+        )
     return rules
 
 
@@ -237,6 +298,14 @@ def _score(
         fs = freshness_state(scheme.last_verified)
         other_score += {"Fresh": 30, "Aging": 15, "Stale": 0, "Unknown": 0}.get(fs, 0)
 
+    # Prefer gender-specific schemes that match the applicant (skip when prefer_not_to_say)
+    user_g = str(profile.get("gender") or "").strip().lower()
+    scheme_g = (getattr(scheme, "target_gender", None) or "any").strip().lower() or "any"
+    if user_g in {"male", "female"} and scheme_g == user_g:
+        other_score += 25
+    elif user_g in {"male", "female"} and scheme_g in {"any", "both", "all", ""}:
+        other_score += 5
+
     breakdown = {
         "eligibility": round(eligibility, 2),
         "purpose": round(purpose_score, 2),
@@ -255,6 +324,15 @@ def _score(
         1,
     )
     return round(total, 2), breakdown
+
+
+def _target_gender_label(scheme: Scheme) -> str:
+    g = (getattr(scheme, "target_gender", None) or "any").strip().lower() or "any"
+    if g == "female":
+        return "Female"
+    if g == "male":
+        return "Male"
+    return "Both"
 
 
 def _scheme_card(
@@ -294,6 +372,9 @@ def _scheme_card(
         "moratorium": scheme.moratorium,
         "required_documents": scheme.required_documents,
         "application_process": scheme.application_process,
+        "timeline": _timeline_display(scheme),
+        "target_gender": getattr(scheme, "target_gender", None) or "any",
+        "target_gender_label": _target_gender_label(scheme),
         "source_url": scheme.source_url,
         "last_verified": scheme.last_verified.isoformat() if scheme.last_verified else None,
         "freshness": freshness_state(scheme.last_verified),
@@ -336,6 +417,32 @@ def _scheme_card(
     }
 
 
+def _is_recommendable_scheme(scheme: Scheme) -> bool:
+    """Skip crawl artifacts / meta pages that are not real loan schemes."""
+    name = (scheme.name or "").strip().lower()
+    stype = (scheme.scheme_type or "").strip().lower()
+    key = (scheme.canonical_key or "").strip().lower()
+    if stype in {"eligibility_reference", "shared_eligibility", "navigation"}:
+        return False
+    junk_tokens = (
+        "shared eligibility",
+        "support-myscheme",
+        "support myscheme",
+        "eligibility criteria",
+        "unnamed scheme",
+        "home page",
+        "about us",
+    )
+    if any(tok in name for tok in junk_tokens) or any(tok in key for tok in junk_tokens):
+        return False
+    # Require at least one published financial signal so empty shells do not rank
+    if scheme.max_loan is None and scheme.interest_rate is None and scheme.min_loan is None:
+        return False
+    if not (scheme.purpose or scheme.scheme_type):
+        return False
+    return True
+
+
 def recommend_schemes(db: Session, profile: dict[str, Any]) -> dict[str, Any]:
     weights = db.query(RankingWeights).filter(RankingWeights.is_active.is_(True)).first()
     if not weights:
@@ -354,6 +461,8 @@ def recommend_schemes(db: Session, profile: dict[str, Any]) -> dict[str, Any]:
     near_misses = []
 
     for scheme in schemes:
+        if not _is_recommendable_scheme(scheme):
+            continue
         if not scheme.max_loan and not scheme.purpose and not scheme.scheme_type:
             continue
 
@@ -409,16 +518,59 @@ def recommend_schemes(db: Session, profile: dict[str, Any]) -> dict[str, Any]:
     recommendations.sort(key=lambda x: x["score"], reverse=True)
     near_misses.sort(key=lambda x: (x["hard_fail_count"], -x["score"], x["soft_fail_count"]))
 
+    top = recommendations[:10]
+    for idx, card in enumerate(top):
+        card["rank"] = idx + 1
+        card["detail_level"] = "full" if idx < 3 else "summary"
+        if idx < 3:
+            principal = float(profile.get("loan_required") or card.get("max_loan") or 0)
+            if card.get("interest_rate") is not None and card.get("tenure"):
+                try:
+                    card["emi_estimate"] = calculate_emi(
+                        principal=principal,
+                        annual_rate_percent=card.get("interest_rate"),
+                        tenure_months=int(card["tenure"]),
+                        moratorium_months=int(card.get("moratorium") or 0),
+                    )
+                except ValueError as exc:
+                    card["emi_estimate"] = {"error": str(exc), "emi": None}
+            else:
+                card["emi_estimate"] = {
+                    "emi": None,
+                    "warnings": ["Interest rate or tenure not published; EMI cannot be estimated."],
+                }
+        else:
+            card["emi_estimate"] = None
+
+    suggestion = None
+    if top:
+        best = top[0]
+        timeline = (best.get("timeline") or {}).get("label") or "NA"
+        pass_reasons = [w["text"] for w in (best.get("why") or []) if w.get("status") == "pass"][:3]
+        why_bit = (" Key matches: " + "; ".join(pass_reasons) + ".") if pass_reasons else ""
+        suggestion = (
+            f"Best match: {best['name']} (score {best['score']}). "
+            f"It aligns closest with your purpose and eligibility.{why_bit} "
+            f"Scheme timeline: {timeline}. "
+            f"Next step: use the detailed section for Option 1 above, then contact the "
+            f"authorised channel partner to confirm documents and apply."
+        )
+        best["suggestion"] = suggestion
+
     if recommendations:
         return {
             "match_status": "matched",
-            "count": len(recommendations),
-            "recommendations": recommendations,
+            "count": len(top),
+            "total_eligible": len(recommendations),
+            "recommendations": top,
+            "top_detailed": top[:3],
+            "more_matches": top[3:],
+            "suggestion": suggestion,
             "near_misses": [],
             "ineligible_count": len(near_misses),
             "message": None,
             "disclaimer": (
-                "Information is compiled from official government sources and may change. "
+                "Information is compiled from published sources and may change. "
                 "The platform provides guidance and scheme matching based on the latest successfully "
                 "verified information available to it. Final eligibility, sanction, interest rate, "
                 "documentation requirements, and disbursement are subject to the applicable official "
@@ -426,11 +578,15 @@ def recommend_schemes(db: Session, profile: dict[str, Any]) -> dict[str, Any]:
             ),
         }
 
-    best = near_misses[:3]
+    best = [m for m in near_misses if _is_recommendable_scheme_card(m)][:3] or near_misses[:3]
     return {
         "match_status": "no_match",
         "count": 0,
+        "total_eligible": 0,
         "recommendations": [],
+        "top_detailed": [],
+        "more_matches": [],
+        "suggestion": None,
         "near_misses": best,
         "ineligible_count": len(near_misses),
         "message": (
@@ -440,7 +596,15 @@ def recommend_schemes(db: Session, profile: dict[str, Any]) -> dict[str, Any]:
             else "No scheme matches your need based on the published eligibility rules available in the system."
         ),
         "disclaimer": (
-            "Information is compiled from official government sources and may change. "
+            "Information is compiled from published sources and may change. "
             "Closest-scheme suggestions are guidance only and do not mean you are eligible."
         ),
     }
+
+
+def _is_recommendable_scheme_card(card: dict[str, Any]) -> bool:
+    name = str(card.get("name") or "").lower()
+    junk = ("shared eligibility", "support-myscheme", "support myscheme", "eligibility criteria")
+    if any(j in name for j in junk):
+        return False
+    return bool(card.get("max_loan") is not None or card.get("interest_rate") is not None)

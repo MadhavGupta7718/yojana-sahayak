@@ -9,6 +9,12 @@ export const CATEGORY_OPTIONS: Opt[] = [
   { value: "Other", en: "Other", hi: "अन्य" },
 ];
 
+export const GENDER_OPTIONS: Opt[] = [
+  { value: "male", en: "Male", hi: "पुरुष" },
+  { value: "female", en: "Female", hi: "महिला" },
+  { value: "prefer_not_to_say", en: "Prefer not to say", hi: "कहना नहीं चाहते" },
+];
+
 export const PURPOSE_OPTIONS: Opt[] = [
   { value: "business", en: "Business", hi: "व्यवसाय" },
   { value: "self-employment", en: "Self-employment", hi: "स्वरोजगार" },

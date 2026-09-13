@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.database.session import get_db
 from app.location.search import search_partners
 from app.models import ApplicationGuidance, Scheme, SourceCitation, UserProfile
-from app.recommendation.engine import recommend_schemes
+from app.recommendation.engine import recommend_schemes, _timeline_display
 from app.schemas import EMIRequest, ForwardGeocodeRequest, NLPParseRequest, PartnerSearchRequest, ProfileInput, ReverseGeocodeRequest
 from app.services.finance import calculate_emi
 from app.services.freshness import freshness_state
@@ -32,6 +32,8 @@ def list_schemes(db: Session = Depends(get_db)):
             "interest_rate": s.interest_rate,
             "max_income": s.max_income,
             "tenure": s.tenure,
+            "timeline": _timeline_display(s),
+            "target_gender": getattr(s, "target_gender", None) or "any",
             "source_url": s.source_url,
             "last_verified": s.last_verified,
             "freshness": freshness_state(s.last_verified),
@@ -71,6 +73,8 @@ def get_scheme(scheme_id: int, db: Session = Depends(get_db)):
         "eligible_activities": s.eligible_activities,
         "required_documents": s.required_documents,
         "application_process": s.application_process,
+        "timeline": _timeline_display(s),
+        "target_gender": getattr(s, "target_gender", None) or "any",
         "source_url": s.source_url,
         "last_verified": s.last_verified,
         "freshness": freshness_state(s.last_verified),

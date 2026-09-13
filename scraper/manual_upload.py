@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 
 from sqlalchemy.orm import Session
 
 from app.models import GovernmentSource, RawDocument, ScrapingRun, StagingRecord
 from scraper.change_detection.promote import promote_staging
-from scraper.extractors.facts import extract_partners, extract_scheme_fields
+from scraper.extractors.facts import extract_document_schemes, extract_partners
 from scraper.extractors.normalize import canonical_key, content_hash
 from scraper.parsers.content import extract_pdf_text, html_to_text
 
@@ -60,44 +59,66 @@ def ingest_upload(
     db.flush()
 
     changes_count = 0
-    scheme_data = extract_scheme_fields(text, filename, url)
-    payload = scheme_data["payload"]
-    staging = StagingRecord(
-        source_id=source.id,
-        raw_document_id=raw.id,
-        entity_type="scheme",
-        entity_key=payload.get("canonical_key") or canonical_key(payload.get("name") or filename),
-        payload=payload,
-        original_text=scheme_data.get("original_text"),
-        confidence=0.7,
-        status="pending",
-        source_url=url,
-    )
-    db.add(staging)
-    db.flush()
-    changes = promote_staging(db, staging)
-    changes_count += len(changes)
+    schemes = extract_document_schemes(text, filename, url)
+    if not schemes:
+        from scraper.extractors.facts import extract_scheme_fields
 
-    for partner in extract_partners(text, url):
-        st = StagingRecord(
+        schemes = [extract_scheme_fields(text, filename, url)]
+
+    for scheme_data in schemes:
+        payload = scheme_data["payload"]
+        staging = StagingRecord(
             source_id=source.id,
             raw_document_id=raw.id,
-            entity_type="partner",
-            entity_key=partner["canonical_key"],
-            payload=partner,
-            confidence=0.5,
+            entity_type="scheme",
+            entity_key=payload.get("canonical_key") or canonical_key(payload.get("name") or filename),
+            payload=payload,
+            original_text=scheme_data.get("original_text"),
+            confidence=0.7,
             status="pending",
             source_url=url,
         )
-        db.add(st)
+        db.add(staging)
         db.flush()
-        changes_count += len(promote_staging(db, st))
+        changes = promote_staging(db, staging)
+        changes_count += len(changes)
+
+        for partner in scheme_data.get("partners") or []:
+            st = StagingRecord(
+                source_id=source.id,
+                raw_document_id=raw.id,
+                entity_type="partner",
+                entity_key=partner["canonical_key"],
+                payload=partner,
+                confidence=0.75,
+                status="pending",
+                source_url=url,
+            )
+            db.add(st)
+            db.flush()
+            changes_count += len(promote_staging(db, st))
+
+    # Fallback partner pass for documents that only list partners
+    if not any(s.get("partners") for s in schemes):
+        for partner in extract_partners(text, url):
+            st = StagingRecord(
+                source_id=source.id,
+                raw_document_id=raw.id,
+                entity_type="partner",
+                entity_key=partner["canonical_key"],
+                payload=partner,
+                confidence=0.5,
+                status="pending",
+                source_url=url,
+            )
+            db.add(st)
+            db.flush()
+            changes_count += len(promote_staging(db, st))
 
     run.documents_processed = 1
     run.changes_detected = changes_count
     run.status = "success"
     run.end_time = datetime.now(timezone.utc)
     source.last_successful_crawl = datetime.now(timezone.utc)
-    source.last_changed = datetime.now(timezone.utc)
     db.commit()
-    return {"run_id": run.id, "changes": changes_count, "raw_document_id": raw.id}
+    return {"raw_document_id": raw.id, "changes": changes_count, "schemes": len(schemes)}

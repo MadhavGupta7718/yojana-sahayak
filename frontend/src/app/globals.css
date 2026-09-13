@@ -694,6 +694,19 @@ button { font-family: inherit; }
   font-family: var(--font-display);
   font-size: 1.05rem;
 }
+.ys-partner-link-note {
+  outline: none;
+  border-radius: 2px;
+  padding: 0.35rem 0.45rem;
+  margin: 0.35rem 0 0;
+  transition: background-color 0.35s ease, box-shadow 0.35s ease;
+}
+.ys-partner-link-note--flash {
+  background: rgba(184, 242, 90, 0.45);
+  box-shadow: 0 0 0 3px rgba(184, 242, 90, 0.65);
+  color: var(--ink);
+  font-weight: 600;
+}
 .why-list { margin: 0; padding-left: 1.1rem; }
 .why-list li { margin-bottom: 0.45rem; line-height: 1.45; }
 .why-list.compact { margin-top: 0.5rem; font-size: 0.9rem; color: var(--muted); }
