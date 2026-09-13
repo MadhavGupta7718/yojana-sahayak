@@ -60,7 +60,7 @@ export default function AdminPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("overview");
   const [busy, setBusy] = useState(false);
-  /** Per-source crawl button: idle → checking → running → finished (or blocked/error). No polling. */
+  /** Per-source crawl button phase. Synced from latest_run while a crawl is active. */
   const [crawlBtn, setCrawlBtn] = useState<
     Record<number, "idle" | "checking" | "running" | "finished" | "blocked" | "error">
   >({});
@@ -87,6 +87,58 @@ export default function AdminPage() {
   ) {
     setCrawlBtn((prev) => ({ ...prev, [id]: phase }));
     if (note !== undefined) setCrawlNote((prev) => ({ ...prev, [id]: note }));
+  }
+
+  function formatRunSummary(run: any | null | undefined): string {
+    if (!run) return "";
+    return (
+      `Run #${run.id}: ${run.status}` +
+      ` · pages ${run.pages_crawled ?? 0}` +
+      ` · docs ${run.documents_processed ?? 0}` +
+      ` · changes ${run.changes_detected ?? 0}` +
+      ` · errors ${run.error_count ?? 0}`
+    );
+  }
+
+  function syncCrawlButtonsFromSources(sourceList: any[]) {
+    setCrawlBtn((prev) => {
+      const next = { ...prev };
+      for (const s of sourceList) {
+        const run = s.latest_run;
+        if (!run) continue;
+        const local = next[s.id];
+        if (run.status === "queued" || run.status === "running") {
+          next[s.id] = "running";
+        } else if (local === "running" || local === "checking") {
+          if (run.status === "success") next[s.id] = "finished";
+          else if (run.status === "restricted") next[s.id] = "blocked";
+          else next[s.id] = "error";
+        }
+      }
+      return next;
+    });
+    setCrawlNote((prev) => {
+      const next = { ...prev };
+      for (const s of sourceList) {
+        const run = s.latest_run;
+        if (!run) continue;
+        const local = prev[s.id];
+        if (run.status === "queued" || run.status === "running") {
+          next[s.id] = formatRunSummary(run) + (run.status === "queued" ? " — waiting for scraper…" : " — crawling…");
+        } else if (local || run.end_time) {
+          const prevNote = (prev[s.id] || "").toLowerCase();
+          if (
+            prevNote.includes("run #") ||
+            prevNote.includes("queued") ||
+            prevNote.includes("crawling") ||
+            prevNote.includes("checking")
+          ) {
+            next[s.id] = formatRunSummary(run);
+          }
+        }
+      }
+      return next;
+    });
   }
 
   function crawlabilityLine(ability: any | null | undefined): string {
@@ -171,6 +223,7 @@ export default function AdminPage() {
       setSchemes(sch);
       setPartners(p);
       setSchedulePaused(Boolean(ctrl?.schedule_paused));
+      syncCrawlButtonsFromSources(s);
       setError(null);
       return { runs: r as any[], sources: s as any[] };
     } catch (err: any) {
@@ -185,6 +238,16 @@ export default function AdminPage() {
     if (token) refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
+
+  // While a crawl is queued/running, poll so Sources status and buttons stay truthful
+  useEffect(() => {
+    if (!token || !anyCrawlBusy) return;
+    const id = window.setInterval(() => {
+      refresh();
+    }, 4000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, anyCrawlBusy]);
 
   async function decide(id: number, approve: boolean) {
     await adminFetch(`/api/v1/admin/changes/${id}/decide`, {
@@ -215,6 +278,25 @@ export default function AdminPage() {
       refresh();
     } catch (err: any) {
       setError(err.message || "Could not approve all changes");
+    }
+  }
+
+  async function purgeNonSchemes() {
+    setError(null);
+    setNotice(null);
+    if (
+      !window.confirm(
+        "Hide all non-scheme pages (privacy/FAQ/terms/etc.) from citizen listings? They will be marked discontinued.",
+      )
+    ) {
+      return;
+    }
+    try {
+      const out = await adminFetch("/api/v1/admin/schemes/purge-non-schemes", { method: "POST" });
+      setNotice(out.message || `Removed ${out.removed || 0} non-scheme row(s).`);
+      refresh();
+    } catch (err: any) {
+      setError(err.message || "Could not purge non-schemes");
     }
   }
 
@@ -297,21 +379,20 @@ export default function AdminPage() {
       }
 
       if (out.started === false && (out.status === "running" || out.status === "queued")) {
-        setSourceCrawl(
-          id,
-          "running",
-          `${checkLine || "OK."} ${out.message || "Another crawl is already in progress."}`,
-        );
+        setSourceCrawl(id, "idle", out.message || "Another crawl is already in progress.");
+        setNotice(out.message || "Another crawl is already in progress.");
+        refresh();
         return;
       }
 
-      // Accepted into queue — keep button on Running until user sees result in Crawl runs.
+      // Accepted into queue — poll will flip to finished/error when the run ends.
       const runHint = out.run_id ? ` Run #${out.run_id}.` : "";
       setSourceCrawl(
         id,
         "running",
-        `${checkLine || "OK."} ${out.message || "Crawl queued."}${runHint} Use Refresh data on Crawl runs.`,
+        `${checkLine || "OK."} ${out.message || "Crawl queued."}${runHint}`,
       );
+      refresh();
     } catch (err: any) {
       const msg = err?.message || "Failed to check/start crawl";
       setSourceCrawl(id, "error", msg);
@@ -382,7 +463,8 @@ export default function AdminPage() {
 
   async function upload(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    const fd = new FormData(e.currentTarget);
+    const form = e.currentTarget;
+    const fd = new FormData(form);
     const res = await fetch(`${API_URL}/api/v1/admin/uploads`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}` },
@@ -392,7 +474,7 @@ export default function AdminPage() {
       setError(await res.text());
       return;
     }
-    e.currentTarget.reset();
+    form.reset();
     refresh();
   }
 
@@ -616,6 +698,7 @@ export default function AdminPage() {
             const reason = disabledReason(s);
             const phase = crawlBtn[s.id] || "idle";
             const note = crawlNote[s.id];
+            const latest = s.latest_run;
             const busyHere = phase === "checking" || phase === "running";
             const crawlLabel =
               phase === "checking"
@@ -629,6 +712,8 @@ export default function AdminPage() {
                       : phase === "error"
                         ? "Failed"
                         : "Crawl now";
+            const robotsLabel =
+              s.robots_allowed === true ? "allowed" : s.robots_allowed === false ? "disallowed" : "unknown";
             return (
               <div key={s.id} className={`admin-row ${busyHere ? "admin-row--crawling" : ""}`}>
                 <div className="admin-row__top">
@@ -638,11 +723,24 @@ export default function AdminPage() {
                       <span className={`admin-badge ${s.enabled ? "" : "muted"}`}>
                         {s.enabled ? "Enabled" : "Disabled"}
                       </span>{" "}
-                      <span className="admin-badge muted">{s.status}</span>{" "}
+                      <span className="admin-badge muted">{s.status || "PENDING"}</span>{" "}
                       <span className="admin-badge muted">{s.discovery_status || "approved"}</span>
-                      {" · "}last crawl: {s.last_successful_crawl || "—"}
-                      {" · "}robots: {String(s.robots_allowed)}
+                      {" · "}robots: {robotsLabel}
+                      {" · "}last crawl:{" "}
+                      {s.last_successful_crawl
+                        ? new Date(s.last_successful_crawl).toLocaleString()
+                        : "—"}
                     </div>
+                    {latest && (
+                      <div className="admin-meta" style={{ marginTop: 4 }}>
+                        Latest run: {formatRunSummary(latest)}
+                        {latest.end_time
+                          ? ` · ended ${new Date(latest.end_time).toLocaleString()}`
+                          : latest.status === "queued" || latest.status === "running"
+                            ? " · in progress"
+                            : ""}
+                      </div>
+                    )}
                     <a className="source-link" href={s.base_url} target="_blank" rel="noreferrer">
                       {s.base_url}
                     </a>
@@ -797,6 +895,19 @@ export default function AdminPage() {
 
       {tab === "schemes" && (
         <div className="admin-list">
+          <div className="admin-row admin-row__top" style={{ alignItems: "center" }}>
+            <div>
+              <div className="font-semibold">Schemes in database ({schemes.length})</div>
+              <p className="admin-meta" style={{ margin: "0.35rem 0 0" }}>
+                Remove privacy/FAQ/terms pages that were wrongly saved as schemes.
+              </p>
+            </div>
+            <div className="admin-actions">
+              <button className="btn btn-secondary" type="button" onClick={() => purgeNonSchemes()}>
+                Hide non-schemes
+              </button>
+            </div>
+          </div>
           {schemes.length === 0 && <p className="panel">No schemes in database.</p>}
           {schemes.map((s) => (
             <div key={s.id} className="admin-row">

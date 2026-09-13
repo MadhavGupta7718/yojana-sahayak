@@ -13,6 +13,7 @@ from scraper.extractors.normalize import (
     parse_months,
     parse_percent,
 )
+from scraper.extractors.scheme_gate import is_loan_scheme_payload, is_non_scheme_document
 
 SCHEME_NAME_HINTS = [
     r"micro\s*credit\s*finance",
@@ -279,11 +280,16 @@ def split_scheme_blocks(text: str) -> list[str]:
 
 def extract_document_schemes(text: str, page_title: str | None = None, url: str = "") -> list[dict[str, Any]]:
     """Extract one or many schemes from a page/PDF."""
+    if is_non_scheme_document(url, page_title or "", text or ""):
+        return []
+
     blocks = split_scheme_blocks(text)
     results = []
     for block in blocks:
         title = page_title if len(blocks) == 1 else None
         data = extract_scheme_fields(block, title, url)
+        if not is_loan_scheme_payload(data["payload"], url=url, text=block):
+            continue
         partners = extract_structured_partners(
             block, url, linked_scheme_key=data["payload"].get("canonical_key")
         )

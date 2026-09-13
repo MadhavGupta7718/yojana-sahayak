@@ -86,12 +86,28 @@ def _scheme_snapshot(scheme: Scheme) -> dict[str, Any]:
     }
 
 
+from scraper.extractors.scheme_gate import is_loan_scheme_payload
+
+
 def promote_staging(db: Session, staging: StagingRecord) -> list[DataChange]:
     changes: list[DataChange] = []
     now = datetime.now(timezone.utc)
     payload = staging.payload or {}
 
     if staging.entity_type == "scheme":
+        # Final safety net: never insert/update Scheme rows for policy/FAQ/junk
+        blob = " ".join(
+            str(x)
+            for x in (
+                payload.get("description"),
+                payload.get("name"),
+                staging.original_text if isinstance(staging.original_text, str) else "",
+            )
+            if x
+        )
+        if not is_loan_scheme_payload(payload, url=staging.source_url or "", text=blob):
+            staging.status = "rejected_non_scheme"
+            return changes
         changes.extend(_promote_scheme(db, staging, payload, now))
     elif staging.entity_type == "partner":
         changes.extend(_promote_partner(db, staging, payload, now))

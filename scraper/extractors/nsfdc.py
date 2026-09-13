@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from scraper.extractors.normalize import canonical_key, normalize_whitespace, parse_indian_amount, parse_months, parse_percent
+from scraper.extractors.scheme_gate import is_loan_scheme_payload
 
 SCHEME_SPLIT = re.compile(
     r"(?:^|\n)\s*\d+\s*\n\s*(Micro Finance Scheme(?:\s*\(MFS\))?|Term Loan|Aajeevika Micro-Finance Yojana|"
@@ -145,6 +146,8 @@ def extract_nsfdc_schemes(text: str, url: str = "") -> list[dict[str, Any]]:
         if project_cost_max:
             payload["raw_fields"] = {"project_cost_context": project_cost_max}
 
+        if not is_loan_scheme_payload(payload, url=url, text=section):
+            continue
         schemes.append({"payload": payload, "original_text": originals})
 
     return schemes

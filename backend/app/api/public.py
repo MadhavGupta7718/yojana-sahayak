@@ -8,8 +8,25 @@ from app.recommendation.engine import recommend_schemes, _timeline_display
 from app.schemas import EMIRequest, ForwardGeocodeRequest, NLPParseRequest, PartnerSearchRequest, ProfileInput, ReverseGeocodeRequest
 from app.services.finance import calculate_emi
 from app.services.freshness import freshness_state
+from scraper.extractors.scheme_gate import is_loan_scheme_record
 
 router = APIRouter(prefix="/api/v1", tags=["public"])
+
+
+def _scheme_is_public(s: Scheme) -> bool:
+    return is_loan_scheme_record(
+        name=s.name or "",
+        scheme_type=s.scheme_type,
+        max_loan=s.max_loan,
+        min_loan=s.min_loan,
+        interest_rate=s.interest_rate,
+        tenure=s.tenure,
+        max_income=s.max_income,
+        purpose=s.purpose,
+        description=s.description,
+        source_url=s.source_url,
+        canonical_key=s.canonical_key,
+    )
 
 
 @router.get("/health")
@@ -20,6 +37,7 @@ def health():
 @router.get("/schemes")
 def list_schemes(db: Session = Depends(get_db)):
     schemes = db.query(Scheme).filter(Scheme.status != "discontinued").order_by(Scheme.name).all()
+    schemes = [s for s in schemes if _scheme_is_public(s)]
     return [
         {
             "id": s.id,

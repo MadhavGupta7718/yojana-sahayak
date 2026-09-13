@@ -11,6 +11,7 @@ from app.models import RankingWeights, Scheme, SchemeEligibilityRule, SourceCita
 from app.rules.engine import evaluate_rule, is_eligible, purpose_compatible
 from app.services.finance import calculate_emi
 from app.services.freshness import freshness_state
+from scraper.extractors.scheme_gate import is_loan_scheme_record
 
 
 def _timeline_display(scheme: Scheme) -> dict[str, Any]:
@@ -419,28 +420,19 @@ def _scheme_card(
 
 def _is_recommendable_scheme(scheme: Scheme) -> bool:
     """Skip crawl artifacts / meta pages that are not real loan schemes."""
-    name = (scheme.name or "").strip().lower()
-    stype = (scheme.scheme_type or "").strip().lower()
-    key = (scheme.canonical_key or "").strip().lower()
-    if stype in {"eligibility_reference", "shared_eligibility", "navigation"}:
-        return False
-    junk_tokens = (
-        "shared eligibility",
-        "support-myscheme",
-        "support myscheme",
-        "eligibility criteria",
-        "unnamed scheme",
-        "home page",
-        "about us",
+    return is_loan_scheme_record(
+        name=scheme.name or "",
+        scheme_type=scheme.scheme_type,
+        max_loan=scheme.max_loan,
+        min_loan=scheme.min_loan,
+        interest_rate=scheme.interest_rate,
+        tenure=scheme.tenure,
+        max_income=scheme.max_income,
+        purpose=scheme.purpose,
+        description=scheme.description,
+        source_url=scheme.source_url,
+        canonical_key=scheme.canonical_key,
     )
-    if any(tok in name for tok in junk_tokens) or any(tok in key for tok in junk_tokens):
-        return False
-    # Require at least one published financial signal so empty shells do not rank
-    if scheme.max_loan is None and scheme.interest_rate is None and scheme.min_loan is None:
-        return False
-    if not (scheme.purpose or scheme.scheme_type):
-        return False
-    return True
 
 
 def recommend_schemes(db: Session, profile: dict[str, Any]) -> dict[str, Any]:

@@ -65,26 +65,49 @@ def overview(db: Session = Depends(get_db), admin: AdminUser = Depends(get_curre
 @router.get("/sources")
 def list_sources(db: Session = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
     sources = db.query(GovernmentSource).order_by(GovernmentSource.id).all()
-    return [
-        {
-            "id": s.id,
-            "source_name": s.source_name,
-            "organization": s.organization,
-            "base_url": s.base_url,
-            "source_type": s.source_type,
-            "authority_level": s.authority_level,
-            "enabled": s.enabled,
-            "crawl_frequency": s.crawl_frequency,
-            "robots_allowed": s.robots_allowed,
-            "last_checked": s.last_checked,
-            "last_successful_crawl": s.last_successful_crawl,
-            "last_changed": s.last_changed,
-            "status": s.status,
-            "notes": s.notes,
-            "discovery_status": s.discovery_status,
-        }
-        for s in sources
-    ]
+    out = []
+    for s in sources:
+        latest = (
+            db.query(ScrapingRun)
+            .filter(ScrapingRun.source_id == s.id)
+            .order_by(ScrapingRun.id.desc())
+            .first()
+        )
+        out.append(
+            {
+                "id": s.id,
+                "source_name": s.source_name,
+                "organization": s.organization,
+                "base_url": s.base_url,
+                "source_type": s.source_type,
+                "authority_level": s.authority_level,
+                "enabled": s.enabled,
+                "crawl_frequency": s.crawl_frequency,
+                "robots_allowed": s.robots_allowed,
+                "last_checked": s.last_checked,
+                "last_successful_crawl": s.last_successful_crawl,
+                "last_changed": s.last_changed,
+                "status": s.status,
+                "notes": s.notes,
+                "discovery_status": s.discovery_status,
+                "latest_run": (
+                    {
+                        "id": latest.id,
+                        "status": latest.status,
+                        "pages_crawled": latest.pages_crawled,
+                        "documents_processed": latest.documents_processed,
+                        "changes_detected": latest.changes_detected,
+                        "error_count": latest.error_count,
+                        "start_time": latest.start_time,
+                        "end_time": latest.end_time,
+                        "notes": latest.notes,
+                    }
+                    if latest
+                    else None
+                ),
+            }
+        )
+    return out
 
 
 @router.post("/sources")
@@ -653,6 +676,52 @@ def list_errors(db: Session = Depends(get_db), admin: AdminUser = Depends(get_cu
         }
         for e in errs
     ]
+
+
+@router.post("/schemes/purge-non-schemes")
+def purge_non_schemes(
+    db: Session = Depends(get_db),
+    admin: AdminUser = Depends(require_roles("superadmin", "reviewer")),
+):
+    """Mark policy/FAQ/noise rows as discontinued so they leave citizen listings."""
+    from scraper.extractors.scheme_gate import is_loan_scheme_record
+
+    rows = db.query(Scheme).filter(Scheme.status != "discontinued").all()
+    removed = []
+    for s in rows:
+        ok = is_loan_scheme_record(
+            name=s.name or "",
+            scheme_type=s.scheme_type,
+            max_loan=s.max_loan,
+            min_loan=s.min_loan,
+            interest_rate=s.interest_rate,
+            tenure=s.tenure,
+            max_income=s.max_income,
+            purpose=s.purpose,
+            description=s.description,
+            source_url=s.source_url,
+            canonical_key=s.canonical_key,
+        )
+        if not ok:
+            s.status = "discontinued"
+            removed.append({"id": s.id, "name": s.name})
+    write_audit(
+        db,
+        admin,
+        "purge_non_schemes",
+        "scheme",
+        details={"count": len(removed), "ids": [r["id"] for r in removed[:200]]},
+    )
+    db.commit()
+    return {
+        "removed": len(removed),
+        "items": removed[:100],
+        "message": (
+            f"Marked {len(removed)} non-scheme row(s) as discontinued."
+            if removed
+            else "No non-scheme rows found."
+        ),
+    }
 
 
 @router.get("/schemes")

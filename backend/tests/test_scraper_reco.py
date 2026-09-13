@@ -180,3 +180,45 @@ def test_target_gender_extraction_and_hard_filter():
     assert evaluate_rule(rule, {"gender": "male"})["passed"] is False
     assert evaluate_rule(rule, {"gender": "female"})["passed"] is True
     assert evaluate_rule(rule, {"gender": "prefer_not_to_say"})["passed"] is True
+
+
+def test_scheme_gate_rejects_policy_pages():
+    from scraper.extractors.scheme_gate import is_loan_scheme_payload, is_non_scheme_document
+    from scraper.extractors.facts import extract_document_schemes
+
+    assert is_non_scheme_document(
+        "https://www.myscheme.gov.in/privacy-policy",
+        "Privacy Policy",
+        "myScheme does not automatically capture any specific personal information",
+    )
+    junk = {
+        "name": "Privacy Policy Something went wrong. Please try again later.",
+        "description": "Sign Out | English Theme Sign In Privacy Policy",
+        "source_url": "https://www.myscheme.gov.in/privacy-policy",
+    }
+    assert is_loan_scheme_payload(junk, url=junk["source_url"], text=junk["description"]) is False
+
+    real = {
+        "name": "Micro Finance Scheme (MFS)",
+        "max_loan": 125000,
+        "interest_rate": 6.5,
+        "purpose": "business",
+        "scheme_type": "term_loan",
+        "description": "NSFDC provides Micro Credit Finance up to Rs. 1.25 lakh",
+        "source_url": "https://nsfdc.nic.in/schemes",
+    }
+    assert is_loan_scheme_payload(real, url=real["source_url"], text=real["description"]) is True
+
+    policy_text = """
+    Privacy Policy Something went wrong. Please try again later. Ok Are you sure you want to sign out?
+    Cancel Sign Out | English Theme Sign In Privacy Policy Home Terms & Conditions
+    """
+    assert extract_document_schemes(policy_text, "Privacy Policy", "https://www.myscheme.gov.in/privacy") == []
+
+    shared = {
+        "name": "NSFDC Shared Eligibility Criteria",
+        "scheme_type": "eligibility_reference",
+        "purpose": "business",
+        "description": "Shared eligibility criteria",
+    }
+    assert is_loan_scheme_payload(shared) is False

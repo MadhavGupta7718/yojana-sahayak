@@ -10,6 +10,7 @@ from app.models import GovernmentSource, RawDocument, ScrapingRun, StagingRecord
 from scraper.change_detection.promote import promote_staging
 from scraper.extractors.facts import extract_document_schemes, extract_partners
 from scraper.extractors.normalize import canonical_key, content_hash
+from scraper.extractors.scheme_gate import is_loan_scheme_payload
 from scraper.parsers.content import extract_pdf_text, html_to_text
 
 
@@ -67,6 +68,8 @@ def ingest_upload(
 
     for scheme_data in schemes:
         payload = scheme_data["payload"]
+        if not is_loan_scheme_payload(payload, url=url, text=text):
+            continue
         staging = StagingRecord(
             source_id=source.id,
             raw_document_id=raw.id,

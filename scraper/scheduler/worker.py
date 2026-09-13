@@ -66,7 +66,8 @@ def run_source_crawl(source_id: int, reason: str = "scheduled", run_id: int | No
                     db.commit()
             return
         logger.info("Starting crawl (%s): %s [%s]", reason, source.source_name, source.base_url)
-        run = SourceCrawler(db, source).crawl(run_id=run_id)
+        force = reason in {"admin-queue", "admin-exclusive"}
+        run = SourceCrawler(db, source, force_refresh=force).crawl(run_id=run_id, force_refresh=force)
         logger.info(
             "Crawl finished (%s): %s status=%s pages=%s docs=%s changes=%s errors=%s",
             reason,
