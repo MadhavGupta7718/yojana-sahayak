@@ -20,6 +20,7 @@ class ProfileInput(BaseModel):
     district: str = Field(..., min_length=1)
     existing_loan: bool = False
     session_id: Optional[str] = None
+    language: str = Field("en", min_length=2, max_length=10)
 
 
 class EMIRequest(BaseModel):

@@ -11,10 +11,12 @@ from app.models import RankingWeights, Scheme, SchemeEligibilityRule, SourceCita
 from app.rules.engine import evaluate_rule, is_eligible, purpose_compatible
 from app.services.finance import calculate_emi
 from app.services.freshness import freshness_state
+from app.services.scheme_dedupe import active_unique_schemes, retire_stale_duplicates
+from app.recommendation import localize as L
 from scraper.extractors.scheme_gate import is_loan_scheme_record
 
 
-def _timeline_display(scheme: Scheme) -> dict[str, Any]:
+def _timeline_display(scheme: Scheme, lang: str = "en") -> dict[str, Any]:
     atype = getattr(scheme, "availability_type", None)
     vf = getattr(scheme, "valid_from", None)
     vt = getattr(scheme, "valid_to", None)
@@ -23,25 +25,29 @@ def _timeline_display(scheme: Scheme) -> dict[str, Any]:
             "availability_type": "lifetime",
             "valid_from": None,
             "valid_to": None,
-            "label": "Lifetime",
+            "label": L.lifetime_label(lang),
         }
     if atype == "period" or vf or vt:
         def _fmt(d):
             if not d:
-                return "NA"
+                return L.na_label(lang)
             try:
                 return d.strftime("%d %b %Y")
             except Exception:
-                return "NA"
+                return L.na_label(lang)
 
         start = _fmt(vf)
         end = _fmt(vt)
-        if start == "NA" and end == "NA":
-            label = "NA"
+        if start == L.na_label(lang) and end == L.na_label(lang):
+            label = L.na_label(lang)
+        elif start == L.na_label(lang):
+            label = f"तक {end}" if lang == "hi" else f"Until {end}"
+        elif end == L.na_label(lang):
+            label = f"{start} से" if lang == "hi" else f"From {start}"
         else:
-            label = f"{start} to {end}"
+            label = f"{start} से {end}" if lang == "hi" else f"{start} to {end}"
         return {
-            "availability_type": atype or "period",
+            "availability_type": "period",
             "valid_from": vf.isoformat() if vf else None,
             "valid_to": vt.isoformat() if vt else None,
             "label": label,
@@ -50,7 +56,7 @@ def _timeline_display(scheme: Scheme) -> dict[str, Any]:
         "availability_type": None,
         "valid_from": None,
         "valid_to": None,
-        "label": "NA",
+        "label": L.na_label(lang),
     }
 
 
@@ -61,56 +67,12 @@ def _fmt_money(n: Any) -> str:
         return str(n)
 
 
-def _fail_reason(rule_type: str, actual: Any, expected: Any, operator: str) -> str:
+def _fail_reason(rule_type: str, actual: Any, expected: Any, operator: str, lang: str = "en") -> str:
     """Human explanation of why the applicant cannot use this scheme."""
-    op = (operator or "").lower()
-    if rule_type in {"income", "annual_family_income"}:
-        if op in {"lte", "<="}:
-            return (
-                f"Your annual family income ({_fmt_money(actual)}) is above the scheme limit "
-                f"({_fmt_money(expected)}). You currently do not meet this income criterion."
-            )
-        if op in {"gte", ">="}:
-            return (
-                f"Your annual family income ({_fmt_money(actual)}) is below the minimum required "
-                f"({_fmt_money(expected)})."
-            )
-        return f"Your income ({_fmt_money(actual)}) does not meet the published income condition ({expected})."
-    if rule_type in {"loan_amount", "loan_required"}:
-        if op in {"lte", "<="}:
-            return (
-                f"Your requested loan ({_fmt_money(actual)}) is higher than the maximum allowed "
-                f"({_fmt_money(expected)}) for this scheme."
-            )
-        if op in {"gte", ">="}:
-            return (
-                f"Your requested loan ({_fmt_money(actual)}) is below the minimum published amount "
-                f"({_fmt_money(expected)})."
-            )
-        return f"Your loan amount ({_fmt_money(actual)}) does not fit this scheme's loan limits."
-    if rule_type == "purpose":
-        return (
-            f"This scheme is for '{expected}' purposes, but you asked for '{actual}'. "
-            "Purpose does not match, so this scheme is not suitable."
-        )
-    if rule_type == "category":
-        allowed = ", ".join(str(v) for v in (expected if isinstance(expected, list) else [expected]))
-        return f"Your category ({actual}) is not in the allowed beneficiary categories ({allowed})."
-    if rule_type == "gender":
-        target = str(expected or "any").lower()
-        label = "women" if target == "female" else ("men" if target == "male" else "all genders")
-        return (
-            f"This scheme is published for {label} beneficiaries. "
-            f"Your selected gender ({actual}) does not match, so this scheme is not available for you."
-        )
-    if rule_type == "age":
-        return f"Your age ({actual}) does not meet the published age condition for this scheme."
-    if rule_type == "project_type":
-        return f"Your project type ({actual}) does not match the activities covered by this scheme."
-    return f"You do not meet the published '{rule_type}' condition for this scheme."
+    return L.fail_reason(rule_type, actual, expected, operator, lang)
 
 
-def _enrich_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _enrich_results(results: list[dict[str, Any]], lang: str = "en") -> list[dict[str, Any]]:
     enriched = []
     for r in results:
         item = dict(r)
@@ -120,6 +82,7 @@ def _enrich_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 item.get("actual"),
                 item.get("expected"),
                 item.get("operator") or "",
+                lang,
             )
             item["gap"] = {
                 "field": item.get("rule_type"),
@@ -127,6 +90,14 @@ def _enrich_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "scheme_requires": item.get("expected"),
                 "message": item["reason"],
             }
+        elif item.get("passed") is True:
+            item["reason"] = L.pass_reason(
+                item.get("rule_type") or "",
+                lang,
+                operator=item.get("operator") or "",
+            )
+        elif item.get("passed") is None:
+            item["reason"] = L.missing_reason(item.get("rule_type") or "", lang)
         enriched.append(item)
     return enriched
 
@@ -327,13 +298,8 @@ def _score(
     return round(total, 2), breakdown
 
 
-def _target_gender_label(scheme: Scheme) -> str:
-    g = (getattr(scheme, "target_gender", None) or "any").strip().lower() or "any"
-    if g == "female":
-        return "Female"
-    if g == "male":
-        return "Male"
-    return "Both"
+def _target_gender_label(scheme: Scheme, lang: str = "en") -> str:
+    return L.gender_label(getattr(scheme, "target_gender", None), lang)
 
 
 def _scheme_card(
@@ -344,6 +310,7 @@ def _scheme_card(
     citations: list,
     *,
     eligible: bool,
+    lang: str = "en",
 ) -> dict[str, Any]:
     why = []
     gaps = []
@@ -373,12 +340,12 @@ def _scheme_card(
         "moratorium": scheme.moratorium,
         "required_documents": scheme.required_documents,
         "application_process": scheme.application_process,
-        "timeline": _timeline_display(scheme),
+        "timeline": _timeline_display(scheme, lang),
         "target_gender": getattr(scheme, "target_gender", None) or "any",
-        "target_gender_label": _target_gender_label(scheme),
+        "target_gender_label": _target_gender_label(scheme, lang),
         "source_url": scheme.source_url,
         "last_verified": scheme.last_verified.isoformat() if scheme.last_verified else None,
-        "freshness": freshness_state(scheme.last_verified),
+        "freshness": L.freshness_label(freshness_state(scheme.last_verified), lang),
         "status": scheme.status,
         "score": score,
         "score_breakdown": breakdown,
@@ -396,15 +363,7 @@ def _scheme_card(
             }
             for c in citations
         ],
-        "disclaimer": (
-            "You appear to meet the published eligibility criteria based on the latest verified "
-            "information available. Final approval is determined by the authorized channel partner."
-            if eligible
-            else (
-                "This is the closest published scheme to your request, but you currently do not meet "
-                "one or more eligibility conditions. It is shown only for guidance — not as an available option."
-            )
-        ),
+        "disclaimer": L.card_disclaimer(eligible, lang),
         "unavailable_fields": [
             f
             for f, v in {
@@ -436,6 +395,7 @@ def _is_recommendable_scheme(scheme: Scheme) -> bool:
 
 
 def recommend_schemes(db: Session, profile: dict[str, Any]) -> dict[str, Any]:
+    lang = L.lang_code(profile)
     weights = db.query(RankingWeights).filter(RankingWeights.is_active.is_(True)).first()
     if not weights:
         settings = get_settings()
@@ -448,7 +408,10 @@ def recommend_schemes(db: Session, profile: dict[str, Any]) -> dict[str, Any]:
             other=settings.weight_other,
         )
 
-    schemes = db.query(Scheme).filter(Scheme.status.in_(["active", "unavailable"])).all()
+    retired = retire_stale_duplicates(db)
+    if retired:
+        db.commit()
+    schemes = active_unique_schemes(db)
     recommendations = []
     near_misses = []
 
@@ -483,7 +446,7 @@ def recommend_schemes(db: Session, profile: dict[str, Any]) -> dict[str, Any]:
                 }
             )
 
-        results = _enrich_results([evaluate_rule(r, profile) for r in rules])
+        results = _enrich_results([evaluate_rule(r, profile) for r in rules], lang)
         eligible, _missing = is_eligible(results)
         score, breakdown = _score(profile, scheme, results, weights)
         citations = (
@@ -491,7 +454,7 @@ def recommend_schemes(db: Session, profile: dict[str, Any]) -> dict[str, Any]:
             .filter(SourceCitation.entity_type == "scheme", SourceCitation.entity_id == scheme.id)
             .all()
         )
-        card = _scheme_card(scheme, score, breakdown, results, citations, eligible=eligible)
+        card = _scheme_card(scheme, score, breakdown, results, citations, eligible=eligible, lang=lang)
 
         if eligible:
             recommendations.append(card)
@@ -529,7 +492,7 @@ def recommend_schemes(db: Session, profile: dict[str, Any]) -> dict[str, Any]:
             else:
                 card["emi_estimate"] = {
                     "emi": None,
-                    "warnings": ["Interest rate or tenure not published; EMI cannot be estimated."],
+                    "warnings": [L.emi_unavailable_warning(lang)],
                 }
         else:
             card["emi_estimate"] = None
@@ -537,16 +500,10 @@ def recommend_schemes(db: Session, profile: dict[str, Any]) -> dict[str, Any]:
     suggestion = None
     if top:
         best = top[0]
-        timeline = (best.get("timeline") or {}).get("label") or "NA"
+        timeline = (best.get("timeline") or {}).get("label") or L.na_label(lang)
         pass_reasons = [w["text"] for w in (best.get("why") or []) if w.get("status") == "pass"][:3]
-        why_bit = (" Key matches: " + "; ".join(pass_reasons) + ".") if pass_reasons else ""
-        suggestion = (
-            f"Best match: {best['name']} (score {best['score']}). "
-            f"It aligns closest with your purpose and eligibility.{why_bit} "
-            f"Scheme timeline: {timeline}. "
-            f"Next step: use the detailed section for Option 1 above, then contact the "
-            f"authorised channel partner to confirm documents and apply."
-        )
+        why_bit = (L.key_matches_prefix(lang) + "; ".join(pass_reasons) + ".") if pass_reasons else ""
+        suggestion = L.matched_suggestion(best["name"], best["score"], why_bit, timeline, lang)
         best["suggestion"] = suggestion
 
     if recommendations:
@@ -561,13 +518,7 @@ def recommend_schemes(db: Session, profile: dict[str, Any]) -> dict[str, Any]:
             "near_misses": [],
             "ineligible_count": len(near_misses),
             "message": None,
-            "disclaimer": (
-                "Information is compiled from published sources and may change. "
-                "The platform provides guidance and scheme matching based on the latest successfully "
-                "verified information available to it. Final eligibility, sanction, interest rate, "
-                "documentation requirements, and disbursement are subject to the applicable official "
-                "rules and the authorized channel partner."
-            ),
+            "disclaimer": L.disclaimer_matched(lang),
         }
 
     best = [m for m in near_misses if _is_recommendable_scheme_card(m)][:3] or near_misses[:3]
@@ -581,16 +532,8 @@ def recommend_schemes(db: Session, profile: dict[str, Any]) -> dict[str, Any]:
         "suggestion": None,
         "near_misses": best,
         "ineligible_count": len(near_misses),
-        "message": (
-            "No scheme matches your need based on the published eligibility rules. "
-            "Below is the closest scheme for reference, with clear reasons why you currently cannot avail it."
-            if best
-            else "No scheme matches your need based on the published eligibility rules available in the system."
-        ),
-        "disclaimer": (
-            "Information is compiled from published sources and may change. "
-            "Closest-scheme suggestions are guidance only and do not mean you are eligible."
-        ),
+        "message": L.no_match_message(bool(best), lang),
+        "disclaimer": L.disclaimer_no_match(lang),
     }
 
 

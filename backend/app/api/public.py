@@ -36,8 +36,13 @@ def health():
 
 @router.get("/schemes")
 def list_schemes(db: Session = Depends(get_db)):
-    schemes = db.query(Scheme).filter(Scheme.status != "discontinued").order_by(Scheme.name).all()
-    schemes = [s for s in schemes if _scheme_is_public(s)]
+    from app.services.scheme_dedupe import active_unique_schemes, retire_stale_duplicates
+
+    # Catalogue and Admin share the same active-unique set
+    retired = retire_stale_duplicates(db)
+    if retired:
+        db.commit()
+    schemes = active_unique_schemes(db)
     return [
         {
             "id": s.id,

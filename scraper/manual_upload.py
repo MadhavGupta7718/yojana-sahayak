@@ -73,6 +73,7 @@ def ingest_upload(
         staging = StagingRecord(
             source_id=source.id,
             raw_document_id=raw.id,
+            scraping_run_id=run.id,
             entity_type="scheme",
             entity_key=payload.get("canonical_key") or canonical_key(payload.get("name") or filename),
             payload=payload,
@@ -90,6 +91,7 @@ def ingest_upload(
             st = StagingRecord(
                 source_id=source.id,
                 raw_document_id=raw.id,
+                scraping_run_id=run.id,
                 entity_type="partner",
                 entity_key=partner["canonical_key"],
                 payload=partner,
@@ -107,6 +109,7 @@ def ingest_upload(
             st = StagingRecord(
                 source_id=source.id,
                 raw_document_id=raw.id,
+                scraping_run_id=run.id,
                 entity_type="partner",
                 entity_key=partner["canonical_key"],
                 payload=partner,

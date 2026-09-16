@@ -489,7 +489,25 @@ button { font-family: inherit; }
   border-bottom: 1px solid var(--border);
 }
 .ys-page { padding-bottom: 3.5rem; }
-.ys-schemes { padding-top: 0.5rem; }
+.ys-schemes { padding-top: 0.5rem; padding-bottom: 2rem; }
+.ys-schemes__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 1rem 0 0.75rem;
+  align-items: center;
+}
+.ys-schemes__toolbar .input,
+.ys-schemes__toolbar .select {
+  flex: 1 1 14rem;
+  min-width: 12rem;
+}
+.ys-schemes__count {
+  margin: 0 0 1rem;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--forest);
+}
 .ys-scheme {
   padding: 1.65rem 0;
   border-bottom: 1px solid var(--border);

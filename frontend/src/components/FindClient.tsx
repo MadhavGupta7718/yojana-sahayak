@@ -62,9 +62,43 @@ type Rec = {
   application_process?: string | null;
 };
 
-function money(n: number | null | undefined) {
-  if (n == null) return "Not published by official source";
+function money(n: number | null | undefined, notPublished: string) {
+  if (n == null) return notPublished;
   return `₹${Number(n).toLocaleString("en-IN")}`;
+}
+
+function fill(template: string | undefined, vars: Record<string, string | number>, fallback: string) {
+  let out = template || fallback;
+  for (const [k, v] of Object.entries(vars)) {
+    out = out.replaceAll(`{${k}}`, String(v));
+  }
+  return out;
+}
+
+const DOC_HI: Record<string, string> = {
+  Aadhaar: "आधार",
+  "Identity proof": "पहचान प्रमाण",
+  "Address proof": "पता प्रमाण",
+  "Income certificate": "आय प्रमाण पत्र",
+  "Caste certificate": "जाति प्रमाण पत्र",
+  "Bank account": "बैंक खाता",
+  "Bank Account": "बैंक खाता",
+  "Project report": "परियोजना रिपोर्ट",
+  "Passport size photograph": "पासपोर्ट आकार फोटो",
+  Passport: "पासपोर्ट",
+  "Educational certificates": "शैक्षणिक प्रमाण पत्र",
+  "Admission letter": "प्रवेश पत्र",
+};
+
+function docLabel(name: string, locale: LocaleCode) {
+  if (locale !== "hi") return name;
+  return DOC_HI[name] || DOC_HI[name.trim()] || name;
+}
+
+function whyStatusLabel(status: string, messages: Messages) {
+  if (status === "pass") return messages.whyStatusPass || "Match";
+  if (status === "warning") return messages.whyStatusWarn || "Need more info";
+  return messages.whyStatusFail || "Does not match";
 }
 
 function humanField(name: string | null | undefined) {
@@ -213,6 +247,7 @@ export default function FindClient({
         project_cost: Number(form.project_cost),
         loan_required: Number(form.loan_required),
         education_status: form.purpose === "education" ? form.education_status : null,
+        language: locale,
       };
       const out = await api<{
         recommendations: Rec[];
@@ -665,21 +700,25 @@ export default function FindClient({
         <div className="mt-6 space-y">
           <div className={`result-banner panel ${matchStatus === "no_match" ? "panel-warn" : ""}`}>
             <h2 className="font-display text-navy" style={{ margin: 0, fontSize: "1.45rem" }}>
-              {matchStatus === "matched" ? "Matching schemes for you" : "No scheme matches your need"}
+              {matchStatus === "matched"
+                ? messages.matchingSchemesTitle || "Matching schemes for you"
+                : messages.noMatchTitle || "No scheme matches your need"}
             </h2>
             <p className="text-sm text-muted mt-2" style={{ marginBottom: 0 }}>
               {matchMessage ||
                 (matchStatus === "matched"
-                  ? "These are guidance results based on published eligibility rules. This is not a loan approval."
-                  : "No published scheme currently fits your details. Closest options below explain exactly where you fall short.")}
+                  ? messages.matchingSchemesLead ||
+                    "These are guidance results based on published eligibility rules. This is not a loan approval."
+                  : messages.noMatchLead ||
+                    "No published scheme currently fits your details. Closest options below explain exactly where you fall short.")}
             </p>
           </div>
 
           {matchStatus === "matched" && (
             <div className="space-y">
               <p className="text-sm text-muted" style={{ margin: 0 }}>
-                Up to 10 best matches. The top 3 are shown in full below (match reasons + EMI). Options 4–10 are
-                summarized.
+                {messages.topMatchesHint ||
+                  "Up to 10 best matches. The top 3 are shown in full below (match reasons + EMI). Options 4–10 are summarized."}
               </p>
 
               {recs.slice(0, 3).map((r) => {
@@ -691,55 +730,59 @@ export default function FindClient({
                     style={selected?.scheme_id === r.scheme_id ? { outline: "2px solid var(--lime, #b8f25a)" } : undefined}
                   >
                     <div className="scheme-card__top" style={{ marginBottom: "0.5rem" }}>
-                      <span className="scheme-rank">Option {r.rank || ""} · detailed</span>
-                      <span className="scheme-match">Match score {r.score}</span>
+                      <span className="scheme-rank">
+                        {fill(messages.optionDetailed, { n: r.rank || "" }, `Option ${r.rank || ""} · detailed`)}
+                      </span>
+                      <span className="scheme-match">
+                        {messages.matchScore || "Match score"} {r.score}
+                      </span>
                     </div>
                     <div>
                       <h3 className="font-display text-navy" style={{ marginTop: 0 }}>{r.name}</h3>
                       <p className="text-sm" style={{ color: "var(--green)" }}>{messages.noGuarantee}</p>
                       {r.description ? <p className="text-sm text-muted">{r.description}</p> : null}
+                      {locale === "hi" ? (
+                        <p className="text-sm text-muted">{messages.sourceTextNote}</p>
+                      ) : null}
                     </div>
 
                     <section>
-                      <h4>Why this scheme?</h4>
+                      <h4>{messages.why || "Why this scheme?"}</h4>
                       <ul className="why-list">
                         {(r.why || []).map((w, i) => (
                           <li key={i} className={`why-${w.status}`}>
-                            <strong>
-                              {w.status === "pass" ? "Match" : w.status === "warning" ? "Need more info" : "Does not match"}:
-                            </strong>{" "}
-                            {w.text}
+                            <strong>{whyStatusLabel(w.status, messages)}:</strong> {w.text}
                           </li>
                         ))}
                       </ul>
                     </section>
 
                     <section>
-                      <h4>Key scheme facts</h4>
+                      <h4>{messages.keyFacts || "Key scheme facts"}</h4>
                       <div className="fact-grid">
-                        <div><span>Maximum loan</span><strong>{money(r.max_loan)}</strong></div>
-                        <div><span>Interest rate (estimated)</span><strong>{r.interest_rate != null ? `${r.interest_rate}%` : "Not published"}</strong></div>
-                        <div><span>Repayment tenure</span><strong>{r.tenure != null ? `${r.tenure} months` : "Not published"}</strong></div>
-                        <div><span>Moratorium</span><strong>{r.moratorium != null ? `${r.moratorium} months` : "Not published"}</strong></div>
-                        <div><span>Income limit</span><strong>{money(r.max_income)}</strong></div>
-                        <div><span>Timeline</span><strong>{r.timeline?.label || "NA"}</strong></div>
-                        <div><span>Best suited for</span><strong>{r.target_gender_label || "Both"}</strong></div>
-                        <div><span>Data freshness</span><strong>{r.freshness}</strong></div>
+                        <div><span>{messages.maxLoan || "Maximum loan"}</span><strong>{money(r.max_loan, messages.moneyNotPublished || "Not published")}</strong></div>
+                        <div><span>{messages.interestEstimated || "Interest rate (estimated)"}</span><strong>{r.interest_rate != null ? `${r.interest_rate}%` : (messages.notPublished || "Not published")}</strong></div>
+                        <div><span>{messages.repaymentTenure || "Repayment tenure"}</span><strong>{r.tenure != null ? `${r.tenure} ${messages.months || "months"}` : (messages.notPublished || "Not published")}</strong></div>
+                        <div><span>{messages.moratorium || "Moratorium"}</span><strong>{r.moratorium != null ? `${r.moratorium} ${messages.months || "months"}` : (messages.notPublished || "Not published")}</strong></div>
+                        <div><span>{messages.incomeLimit || "Income limit"}</span><strong>{money(r.max_income, messages.moneyNotPublished || "Not published")}</strong></div>
+                        <div><span>{messages.timeline || "Timeline"}</span><strong>{r.timeline?.label || "NA"}</strong></div>
+                        <div><span>{messages.bestSuitedFor || "Best suited for"}</span><strong>{r.target_gender_label || messages.genderBoth || "Both"}</strong></div>
+                        <div><span>{messages.dataFreshness || "Data freshness"}</span><strong>{r.freshness}</strong></div>
                       </div>
                     </section>
 
                     <section>
                       <h4>{messages.calculator}</h4>
                       <p className="text-sm text-muted" style={{ marginTop: "-0.35rem" }}>
-                        {messages.estimated} values only — confirm with the channel partner.
+                        {messages.emiConfirmNote || `${messages.estimated} values only — confirm with the channel partner.`}
                       </p>
                       {r.interest_rate == null || r.tenure == null ? (
                         <p className="text-muted">{messages.notAvailable}</p>
                       ) : emiRow?.emi != null ? (
                         <div className="fact-grid">
-                          <div><span>Estimated EMI</span><strong>₹{Number(emiRow.emi).toLocaleString("en-IN")}</strong></div>
-                          <div><span>Total interest</span><strong>₹{Number(emiRow.total_interest).toLocaleString("en-IN")}</strong></div>
-                          <div><span>Total repayment</span><strong>₹{Number(emiRow.total_repayment).toLocaleString("en-IN")}</strong></div>
+                          <div><span>{messages.estimatedEmi || "Estimated EMI"}</span><strong>₹{Number(emiRow.emi).toLocaleString("en-IN")}</strong></div>
+                          <div><span>{messages.totalInterest || "Total interest"}</span><strong>₹{Number(emiRow.total_interest).toLocaleString("en-IN")}</strong></div>
+                          <div><span>{messages.totalRepayment || "Total repayment"}</span><strong>₹{Number(emiRow.total_repayment).toLocaleString("en-IN")}</strong></div>
                         </div>
                       ) : (
                         <p className="text-muted">{emiRow?.warnings?.[0] || messages.notAvailable}</p>
@@ -751,11 +794,11 @@ export default function FindClient({
                       {r.required_documents?.length ? (
                         <ul className="doc-list">
                           {r.required_documents.map((d) => (
-                            <li key={d}>{d}</li>
+                            <li key={d}>{docLabel(d, locale)}</li>
                           ))}
                         </ul>
                       ) : (
-                        <p className="text-muted">Document list is not available from the official source yet. Confirm with the channel partner.</p>
+                        <p className="text-muted">{messages.docsUnavailable || "Document list is not available from the official source yet. Confirm with the channel partner."}</p>
                       )}
                     </section>
 
@@ -765,11 +808,11 @@ export default function FindClient({
                         className="btn btn-secondary"
                         onClick={() => focusPartnerSearch(r)}
                       >
-                        Find channel partner for this scheme
+                        {messages.findPartnerForScheme || "Find channel partner for this scheme"}
                       </button>
                       {r.source_url ? (
                         <a className="source-link" href={r.source_url} target="_blank" rel="noreferrer">
-                          Open official source
+                          {messages.openOfficialSource || "Open official source"}
                         </a>
                       ) : null}
                     </div>
@@ -779,7 +822,9 @@ export default function FindClient({
 
               {recs.length > 3 && (
                 <div className="scheme-list">
-                  <h3 className="font-display text-navy" style={{ marginBottom: 0 }}>More matches (4–{recs.length})</h3>
+                  <h3 className="font-display text-navy" style={{ marginBottom: 0 }}>
+                    {fill(messages.moreMatches, { n: recs.length }, `More matches (4–${recs.length})`)}
+                  </h3>
                   {recs.slice(3).map((r, idx) => (
                     <button
                       key={r.scheme_id}
@@ -793,16 +838,20 @@ export default function FindClient({
                       }}
                     >
                       <div className="scheme-card__top">
-                        <span className="scheme-rank">Option {r.rank || idx + 4}</span>
-                        <span className="scheme-match">Match score {r.score}</span>
+                        <span className="scheme-rank">
+                          {fill(messages.optionN, { n: r.rank || idx + 4 }, `Option ${r.rank || idx + 4}`)}
+                        </span>
+                        <span className="scheme-match">
+                          {messages.matchScore || "Match score"} {r.score}
+                        </span>
                       </div>
                       <h3>{r.name}</h3>
                       <div className="scheme-facts">
-                        <span>Max loan: {money(r.max_loan)}</span>
-                        <span>Interest: {r.interest_rate != null ? `${r.interest_rate}%` : "Not published"}</span>
-                        <span>Tenure: {r.tenure != null ? `${r.tenure} months` : "Not published"}</span>
-                        <span>Timeline: {r.timeline?.label || "NA"}</span>
-                        <span>For: {r.target_gender_label || "Both"}</span>
+                        <span>{messages.maxLoanShort || "Max loan"}: {money(r.max_loan, messages.moneyNotPublished || "Not published")}</span>
+                        <span>{messages.interestShort || "Interest"}: {r.interest_rate != null ? `${r.interest_rate}%` : (messages.notPublished || "Not published")}</span>
+                        <span>{messages.tenureShort || "Tenure"}: {r.tenure != null ? `${r.tenure} ${messages.months || "months"}` : (messages.notPublished || "Not published")}</span>
+                        <span>{messages.timelineShort || "Timeline"}: {r.timeline?.label || "NA"}</span>
+                        <span>{messages.forShort || "For"}: {r.target_gender_label || messages.genderBoth || "Both"}</span>
                       </div>
                     </button>
                   ))}
@@ -812,7 +861,7 @@ export default function FindClient({
               {suggestion && (
                 <div className="panel" style={{ borderLeft: "4px solid var(--lime, #b8f25a)" }}>
                   <h3 className="font-display" style={{ marginTop: 0, fontSize: "1.1rem" }}>
-                    Suggestion for your best match
+                    {messages.suggestionTitle || "Suggestion for your best match"}
                   </h3>
                   <p className="text-sm" style={{ marginBottom: 0 }}>{suggestion}</p>
                 </div>
@@ -823,7 +872,7 @@ export default function FindClient({
           {matchStatus === "no_match" && nearMisses.length > 0 && (
             <div className="scheme-list">
               <p className="text-sm text-muted" style={{ margin: 0 }}>
-                Closest scheme(s) — not available for you right now:
+                {messages.closestSchemes || "Closest scheme(s) — not available for you right now:"}
               </p>
               {nearMisses.map((r, idx) => (
                 <button
@@ -839,8 +888,10 @@ export default function FindClient({
                   }}
                 >
                   <div className="scheme-card__top">
-                    <span className="scheme-rank">Best reference {idx + 1}</span>
-                    <span className="scheme-blocked">Cannot avail</span>
+                    <span className="scheme-rank">
+                      {fill(messages.bestReference, { n: idx + 1 }, `Best reference ${idx + 1}`)}
+                    </span>
+                    <span className="scheme-blocked">{messages.cannotAvail || "Cannot avail"}</span>
                   </div>
                   <h3>{r.name}</h3>
                   <ul className="why-list compact">
@@ -865,7 +916,7 @@ export default function FindClient({
                 <h3 className="font-display text-navy" style={{ marginTop: 0 }}>{selected.name}</h3>
                 {selected.eligible === false || matchStatus === "no_match" ? (
                   <p className="text-sm" style={{ color: "#b91c1c" }}>
-                    You cannot currently avail this scheme. Review the gaps below.
+                    {messages.cannotAvailDetail || "You cannot currently avail this scheme. Review the gaps below."}
                   </p>
                 ) : (
                   <p className="text-sm" style={{ color: "var(--green)" }}>{messages.noGuarantee}</p>
@@ -874,7 +925,7 @@ export default function FindClient({
 
               {(selected.gaps?.length || selected.blocking_reasons?.length) ? (
                 <section className="gap-box">
-                  <h4>Where you fall short</h4>
+                  <h4>{messages.whereFallShort || "Where you fall short"}</h4>
                   <ul className="why-list">
                     {(selected.gaps?.length
                       ? selected.gaps.map((g) => g.message)
@@ -887,28 +938,31 @@ export default function FindClient({
               ) : null}
 
               <section>
-                <h4>{matchStatus === "no_match" ? "Eligibility check details" : "Why this scheme?"}</h4>
+                <h4>
+                  {matchStatus === "no_match"
+                    ? messages.eligibilityDetails || "Eligibility check details"
+                    : messages.why || "Why this scheme?"}
+                </h4>
                 <ul className="why-list">
                   {selected.why.map((w, i) => (
                     <li key={i} className={`why-${w.status}`}>
-                      <strong>{w.status === "pass" ? "Match" : w.status === "warning" ? "Need more info" : "Does not match"}:</strong>{" "}
-                      {w.text}
+                      <strong>{whyStatusLabel(w.status, messages)}:</strong> {w.text}
                     </li>
                   ))}
                 </ul>
               </section>
 
               <section>
-                <h4>Key scheme facts</h4>
+                <h4>{messages.keyFacts || "Key scheme facts"}</h4>
                 <div className="fact-grid">
-                  <div><span>Maximum loan</span><strong>{money(selected.max_loan)}</strong></div>
-                  <div><span>Interest rate (estimated)</span><strong>{selected.interest_rate != null ? `${selected.interest_rate}%` : "Not published"}</strong></div>
-                  <div><span>Repayment tenure</span><strong>{selected.tenure != null ? `${selected.tenure} months` : "Not published"}</strong></div>
-                  <div><span>Moratorium</span><strong>{selected.moratorium != null ? `${selected.moratorium} months` : "Not published"}</strong></div>
-                  <div><span>Income limit</span><strong>{money(selected.max_income)}</strong></div>
-                  <div><span>Timeline</span><strong>{selected.timeline?.label || "NA"}</strong></div>
-                  <div><span>Best suited for</span><strong>{selected.target_gender_label || "Both"}</strong></div>
-                  <div><span>Data freshness</span><strong>{selected.freshness}</strong></div>
+                  <div><span>{messages.maxLoan || "Maximum loan"}</span><strong>{money(selected.max_loan, messages.moneyNotPublished || "Not published")}</strong></div>
+                  <div><span>{messages.interestEstimated || "Interest rate (estimated)"}</span><strong>{selected.interest_rate != null ? `${selected.interest_rate}%` : (messages.notPublished || "Not published")}</strong></div>
+                  <div><span>{messages.repaymentTenure || "Repayment tenure"}</span><strong>{selected.tenure != null ? `${selected.tenure} ${messages.months || "months"}` : (messages.notPublished || "Not published")}</strong></div>
+                  <div><span>{messages.moratorium || "Moratorium"}</span><strong>{selected.moratorium != null ? `${selected.moratorium} ${messages.months || "months"}` : (messages.notPublished || "Not published")}</strong></div>
+                  <div><span>{messages.incomeLimit || "Income limit"}</span><strong>{money(selected.max_income, messages.moneyNotPublished || "Not published")}</strong></div>
+                  <div><span>{messages.timeline || "Timeline"}</span><strong>{selected.timeline?.label || "NA"}</strong></div>
+                  <div><span>{messages.bestSuitedFor || "Best suited for"}</span><strong>{selected.target_gender_label || messages.genderBoth || "Both"}</strong></div>
+                  <div><span>{messages.dataFreshness || "Data freshness"}</span><strong>{selected.freshness}</strong></div>
                 </div>
               </section>
                 </>
@@ -922,7 +976,7 @@ export default function FindClient({
                     tabIndex={-1}
                     className={`text-sm text-muted ys-partner-link-note${partnerLinkFlash ? " ys-partner-link-note--flash" : ""}`}
                   >
-                    Partner search is linked to the scheme you selected above (Option {selected.rank || 1}).
+                    {fill(messages.partnerLinkedNote, { n: selected.rank || 1 }, `Partner search is linked to the scheme you selected above (Option ${selected.rank || 1}).`)}
                   </p>
                 </div>
               )}
@@ -933,33 +987,33 @@ export default function FindClient({
               <section>
                 <h4>{messages.calculator}</h4>
                 <p className="text-sm text-muted" style={{ marginTop: "-0.35rem" }}>
-                  {messages.estimated} values only — confirm with the channel partner.
+                  {messages.emiConfirmNote || `${messages.estimated} values only — confirm with the channel partner.`}
                 </p>
                 {selected.eligible === false || matchStatus === "no_match" ? (
-                  <p className="text-muted">EMI estimate is shown only for schemes you appear eligible for.</p>
+                  <p className="text-muted">{messages.emiOnlyEligible || "EMI estimate is shown only for schemes you appear eligible for."}</p>
                 ) : selected.interest_rate == null || selected.tenure == null ? (
                   <p className="text-muted">{messages.notAvailable}</p>
                 ) : emi ? (
                   <div className="fact-grid">
-                    <div><span>Estimated EMI</span><strong>₹{Number(emi.emi).toLocaleString("en-IN")}</strong></div>
-                    <div><span>Total interest</span><strong>₹{Number(emi.total_interest).toLocaleString("en-IN")}</strong></div>
-                    <div><span>Total repayment</span><strong>₹{Number(emi.total_repayment).toLocaleString("en-IN")}</strong></div>
+                    <div><span>{messages.estimatedEmi || "Estimated EMI"}</span><strong>₹{Number(emi.emi).toLocaleString("en-IN")}</strong></div>
+                    <div><span>{messages.totalInterest || "Total interest"}</span><strong>₹{Number(emi.total_interest).toLocaleString("en-IN")}</strong></div>
+                    <div><span>{messages.totalRepayment || "Total repayment"}</span><strong>₹{Number(emi.total_repayment).toLocaleString("en-IN")}</strong></div>
                   </div>
                 ) : (
                   <button type="button" className="btn btn-secondary" onClick={() => calcEmi(selected)}>
-                    Calculate estimate
+                    {messages.calculateEstimate || "Calculate estimate"}
                   </button>
                 )}
               </section>
               ) : matchStatus === "matched" ? (
                 <section>
                   <h4>{messages.calculator}</h4>
-                  <p className="text-muted">Open one of the top 3 matches for a detailed EMI estimate.</p>
+                  <p className="text-muted">{messages.emiTop3Only || "Open one of the top 3 matches for a detailed EMI estimate."}</p>
                 </section>
               ) : (
               <section>
                 <h4>{messages.calculator}</h4>
-                <p className="text-muted">EMI estimate is shown only for schemes you appear eligible for.</p>
+                <p className="text-muted">{messages.emiOnlyEligible || "EMI estimate is shown only for schemes you appear eligible for."}</p>
               </section>
               )}
 
@@ -968,50 +1022,54 @@ export default function FindClient({
                 {selected.required_documents?.length ? (
                   <ul className="doc-list">
                     {selected.required_documents.map((d) => (
-                      <li key={d}>{d}</li>
+                      <li key={d}>{docLabel(d, locale)}</li>
                     ))}
                   </ul>
                 ) : (
-                  <p className="text-muted">Document list is not available from the official source yet. Confirm with the channel partner.</p>
+                  <p className="text-muted">{messages.docsUnavailable || "Document list is not available from the official source yet. Confirm with the channel partner."}</p>
                 )}
               </section>
 
               <section>
                 <h4>{messages.guidance}</h4>
                 <ol className="guide-list">
-                  <li>Confirm eligibility on the official scheme page.</li>
-                  <li>Find an authorized channel partner below.</li>
-                  <li>Contact or visit the partner with your documents.</li>
-                  <li>Ask the partner to confirm current scheme availability.</li>
-                  <li>Complete the official application only through the partner.</li>
+                  <li>{messages.guide1 || "Confirm eligibility on the official scheme page."}</li>
+                  <li>{messages.guide2 || "Find an authorized channel partner below."}</li>
+                  <li>{messages.guide3 || "Contact or visit the partner with your documents."}</li>
+                  <li>{messages.guide4 || "Ask the partner to confirm current scheme availability."}</li>
+                  <li>{messages.guide5 || "Complete the official application only through the partner."}</li>
                 </ol>
                 {selected.application_process && <p className="text-sm text-muted mt-2">{selected.application_process}</p>}
               </section>
 
               <section className="source-box">
-                <h4>Official sources (verify here)</h4>
+                <h4>{messages.officialSourcesVerify || "Official sources (verify here)"}</h4>
                 <p className="text-sm text-muted">
-                  Last verified: {selected.last_verified ? new Date(selected.last_verified).toLocaleDateString("en-IN") : messages.notAvailable}
+                  {messages.lastVerified}: {selected.last_verified ? new Date(selected.last_verified).toLocaleDateString(locale === "hi" ? "hi-IN" : "en-IN") : messages.notAvailable}
                 </p>
                 {selected.source_url ? (
                   <a className="source-link" href={selected.source_url} target="_blank" rel="noreferrer">
-                    Open main official scheme source
+                    {messages.openMainOfficial || "Open main official scheme source"}
                   </a>
                 ) : (
-                  <p className="text-muted">Main source URL unavailable.</p>
+                  <p className="text-muted">{locale === "hi" ? "मुख्य स्रोत URL उपलब्ध नहीं।" : "Main source URL unavailable."}</p>
                 )}
                 <ul className="source-list">
                   {(selected.citations?.length ? selected.citations : []).map((c, i) => (
                     <li key={i}>
                       <span>{humanField(c.field_name)}</span>
                       <a href={c.source_url} target="_blank" rel="noreferrer">
-                        {c.source_title || "View official source"}
+                        {c.source_title || messages.officialSource || "View official source"}
                       </a>
                     </li>
                   ))}
                 </ul>
                 {!selected.citations?.length && selected.source_url && (
-                  <p className="text-sm text-muted mt-2">Open the main official source above to verify scheme details.</p>
+                  <p className="text-sm text-muted mt-2">
+                    {locale === "hi"
+                      ? "योजना विवरण सत्यापित करने के लिए ऊपर मुख्य आधिकारिक स्रोत खोलें।"
+                      : "Open the main official source above to verify scheme details."}
+                  </p>
                 )}
               </section>
               </>
@@ -1179,7 +1237,7 @@ export default function FindClient({
               <section className="gap-box">
                 <h4>Next step</h4>
                 <p className="text-sm" style={{ marginBottom: 0 }}>
-                  Partner search is available only after a scheme matches your published eligibility criteria.
+                  {messages.partnerOnlyAfterMatch || "Partner search is available only after a scheme matches your published eligibility criteria."}
                   Adjust income, loan amount, or purpose and try again if your situation changes.
                 </p>
               </section>

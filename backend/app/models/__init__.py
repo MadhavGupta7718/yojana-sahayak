@@ -210,6 +210,7 @@ class StagingRecord(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("government_sources.id"), nullable=False)
     raw_document_id: Mapped[Optional[int]] = mapped_column(ForeignKey("raw_documents.id"), nullable=True)
+    scraping_run_id: Mapped[Optional[int]] = mapped_column(ForeignKey("scraping_runs.id"), nullable=True, index=True)
     entity_type: Mapped[str] = mapped_column(String(50), nullable=False)  # scheme, partner, guidance, document
     entity_key: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
     payload: Mapped[Any] = mapped_column(JSONB, nullable=False)
@@ -231,10 +232,11 @@ class DataChange(Base, TimestampMixin):
     new_value: Mapped[Optional[Any]] = mapped_column(JSONB, nullable=True)
     source_id: Mapped[Optional[int]] = mapped_column(ForeignKey("government_sources.id"), nullable=True)
     source_url: Mapped[Optional[str]] = mapped_column(String(2000), nullable=True)
+    scraping_run_id: Mapped[Optional[int]] = mapped_column(ForeignKey("scraping_runs.id"), nullable=True, index=True)
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="detected")
-    # detected, pending_review, approved, rejected, auto_approved, conflict
+    # detected, pending_review, approved, rejected, auto_approved, conflict, applied, undone
     reviewed_by: Mapped[Optional[int]] = mapped_column(ForeignKey("admin_users.id"), nullable=True)
     reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

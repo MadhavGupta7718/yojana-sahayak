@@ -6,15 +6,26 @@ import { API_URL } from "@/lib/api";
 const TABS = [
   { id: "overview", label: "Overview" },
   { id: "sources", label: "Sources" },
-  { id: "changes", label: "Change review" },
-  { id: "runs", label: "Crawl runs" },
+  { id: "crawl-review", label: "Crawl review" },
   { id: "schemes", label: "Schemes" },
   { id: "partners", label: "Partners" },
   { id: "upload", label: "Manual upload" },
 ] as const;
 
 function labelKey(key: string) {
-  return key.replace(/_/g, " ");
+  const labels: Record<string, string> = {
+    total_schemes: "Active unique schemes",
+    discontinued_schemes: "Discontinued / duplicates",
+    undoable_changes: "Undoable changes",
+    pending_changes: "Leftover pending changes",
+    total_partners: "Active partners",
+    government_sources: "Government sources",
+    enabled_sources: "Enabled sources",
+    successful_runs: "Successful runs",
+    failed_runs: "Failed runs",
+    stale_schemes: "Unverified schemes",
+  };
+  return labels[key] || key.replace(/_/g, " ");
 }
 
 function disabledReason(s: {
@@ -52,7 +63,9 @@ export default function AdminPage() {
   const [overview, setOverview] = useState<any>(null);
   const [sources, setSources] = useState<any[]>([]);
   const [changes, setChanges] = useState<any[]>([]);
+  const [unlinkedChanges, setUnlinkedChanges] = useState<any[]>([]);
   const [runs, setRuns] = useState<any[]>([]);
+  const [selectedRun, setSelectedRun] = useState<any | null>(null);
   const [schemes, setSchemes] = useState<any[]>([]);
   const [partners, setPartners] = useState<any[]>([]);
   const [versions, setVersions] = useState<any[]>([]);
@@ -79,6 +92,48 @@ export default function AdminPage() {
     () => Object.values(crawlBtn).some((p) => p === "checking" || p === "running"),
     [crawlBtn],
   );
+
+  const changesByScheme = useMemo(() => {
+    const groups: Record<string, { id: string; title: string; items: any[] }> = {};
+    for (const c of changes) {
+      const id = `${c.entity_type}:${c.entity_id ?? c.entity_key ?? c.id}`;
+      if (!groups[id]) {
+        groups[id] = {
+          id,
+          title: c.entity_name || c.entity_key || `${c.entity_type} #${c.entity_id || "?"}`,
+          items: [],
+        };
+      }
+      groups[id].items.push(c);
+    }
+    return Object.values(groups);
+  }, [changes]);
+
+  const unlinkedByScheme = useMemo(() => {
+    const groups: Record<string, { id: string; title: string; items: any[] }> = {};
+    for (const c of unlinkedChanges) {
+      const id = `${c.entity_type}:${c.entity_id ?? c.entity_key ?? c.id}`;
+      if (!groups[id]) {
+        groups[id] = {
+          id,
+          title: c.entity_name || c.entity_key || `${c.entity_type} #${c.entity_id || "?"}`,
+          items: [],
+        };
+      }
+      groups[id].items.push(c);
+    }
+    return Object.values(groups);
+  }, [unlinkedChanges]);
+
+  function formatChangeValue(value: unknown) {
+    if (value === null || value === undefined) return "—";
+    if (typeof value === "string") return value || "—";
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
 
   function setSourceCrawl(
     id: number,
@@ -207,10 +262,10 @@ export default function AdminPage() {
     if (!token) return;
     setBusy(true);
     try {
-      const [o, s, c, r, sch, p, ctrl] = await Promise.all([
+      const [o, s, u, r, sch, p, ctrl] = await Promise.all([
         adminFetch("/api/v1/admin/overview"),
         adminFetch("/api/v1/admin/sources"),
-        adminFetch("/api/v1/admin/changes?status=pending_review"),
+        adminFetch("/api/v1/admin/changes?undoable=true&unlinked=true"),
         adminFetch("/api/v1/admin/runs"),
         adminFetch("/api/v1/admin/schemes"),
         adminFetch("/api/v1/admin/partners"),
@@ -218,12 +273,22 @@ export default function AdminPage() {
       ]);
       setOverview(o);
       setSources(s);
-      setChanges(c);
+      setUnlinkedChanges(u);
       setRuns(r);
       setSchemes(sch);
       setPartners(p);
       setSchedulePaused(Boolean(ctrl?.schedule_paused));
       syncCrawlButtonsFromSources(s);
+      if (selectedRun?.id) {
+        const [runDetail, runChanges] = await Promise.all([
+          adminFetch(`/api/v1/admin/runs/${selectedRun.id}`),
+          adminFetch(`/api/v1/admin/changes?run_id=${selectedRun.id}`),
+        ]);
+        setSelectedRun(runDetail);
+        setChanges(runChanges);
+      } else {
+        setChanges([]);
+      }
       setError(null);
       return { runs: r as any[], sources: s as any[] };
     } catch (err: any) {
@@ -249,36 +314,81 @@ export default function AdminPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, anyCrawlBusy]);
 
-  async function decide(id: number, approve: boolean) {
-    await adminFetch(`/api/v1/admin/changes/${id}/decide`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ approve }),
-    });
-    refresh();
+  async function openRun(run: any) {
+    setError(null);
+    setBusy(true);
+    try {
+      const [runDetail, runChanges] = await Promise.all([
+        adminFetch(`/api/v1/admin/runs/${run.id}`),
+        adminFetch(`/api/v1/admin/changes?run_id=${run.id}`),
+      ]);
+      setSelectedRun(runDetail);
+      setChanges(runChanges);
+    } catch (err: any) {
+      setError(err.message || "Could not load crawl changes");
+    } finally {
+      setBusy(false);
+    }
   }
 
-  async function approveAllChanges() {
+  function backToRuns() {
+    setSelectedRun(null);
+    setChanges([]);
+  }
+
+  async function undoChange(id: number) {
     setError(null);
     setNotice(null);
-    if (!changes.length) {
-      setNotice("No pending changes to approve.");
-      return;
-    }
-    if (
-      !window.confirm(
-        `Approve all ${changes.length} pending change(s)? This applies them to the live scheme/partner data.`,
-      )
-    ) {
+    if (!window.confirm("Undo this field change and restore the previous value?")) {
       return;
     }
     try {
-      const out = await adminFetch("/api/v1/admin/changes/approve-all", { method: "POST" });
-      setNotice(out.message || `Approved ${out.approved || 0} change(s).`);
-      refresh();
+      const out = await adminFetch(`/api/v1/admin/changes/${id}/undo`, { method: "POST" });
+      setNotice(out.message || "Change undone.");
+      await refresh();
     } catch (err: any) {
-      setError(err.message || "Could not approve all changes");
+      setError(err.message || "Could not undo change");
     }
+  }
+
+  function renderChangeGroups(groups: { id: string; title: string; items: any[] }[]) {
+    if (!groups.length) return <p className="panel">No field changes in this view.</p>;
+    return groups.map((group) => (
+      <div key={group.id} className="admin-row">
+        <div className="font-semibold" style={{ marginBottom: "0.75rem" }}>
+          {group.title}
+        </div>
+        <div className="stack" style={{ gap: "0.85rem" }}>
+          {group.items.map((c) => (
+            <div key={c.id} style={{ borderTop: "1px solid var(--border, #e5e7eb)", paddingTop: "0.75rem" }}>
+              <div className="admin-row__top" style={{ alignItems: "flex-start" }}>
+                <div>
+                  <div className="font-semibold">
+                    {c.field_name}{" "}
+                    <span className="admin-badge muted">{c.status}</span>
+                    {c.is_sensitive ? <span className="admin-badge warn">Sensitive</span> : null}
+                  </div>
+                  <div className="admin-meta">
+                    Old: {formatChangeValue(c.old_value)} → New: {formatChangeValue(c.new_value)}
+                  </div>
+                  <div className="admin-meta">Applied {c.detected_at || "—"}</div>
+                  {c.source_url && (
+                    <a className="source-link" href={c.source_url} target="_blank" rel="noreferrer">
+                      Official source
+                    </a>
+                  )}
+                </div>
+                {c.can_undo ? (
+                  <button className="btn btn-secondary" type="button" onClick={() => undoChange(c.id)}>
+                    Undo
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    ));
   }
 
   async function purgeNonSchemes() {
@@ -810,86 +920,118 @@ export default function AdminPage() {
         </div>
       )}
 
-      {tab === "changes" && (
+      {tab === "crawl-review" && (
         <div className="admin-list">
-          <div className="admin-row admin-row__top" style={{ alignItems: "center" }}>
-            <div>
-              <div className="font-semibold">Pending changes ({changes.length})</div>
-              <p className="admin-meta" style={{ margin: "0.35rem 0 0" }}>
-                Review field updates from crawls, or approve everything in one step.
-              </p>
-            </div>
-            <div className="admin-actions">
-              <button
-                className="btn btn-primary"
-                type="button"
-                onClick={() => approveAllChanges()}
-                disabled={!changes.length}
-                title={changes.length ? "Approve every pending change" : "Nothing to approve"}
-              >
-                Approve all
-              </button>
-            </div>
-          </div>
-          {changes.length === 0 && <p className="panel">No pending changes to review.</p>}
-          {changes.map((c) => (
-            <div key={c.id} className="admin-row">
-              <div className="font-semibold">
-                {c.entity_type} / {c.field_name}{" "}
-                {c.is_conflict ? <span className="admin-badge warn">Conflict</span> : null}
-              </div>
-              <div className="admin-meta">
-                Old: {JSON.stringify(c.old_value)} → New: {JSON.stringify(c.new_value)}
-              </div>
-              {c.source_url && (
-                <a className="source-link" href={c.source_url} target="_blank" rel="noreferrer">
-                  View source
-                </a>
-              )}
-              <div className="admin-actions mt-3">
-                <button className="btn btn-primary" type="button" onClick={() => decide(c.id, true)}>
-                  Approve
-                </button>
-                <button className="btn btn-secondary" type="button" onClick={() => decide(c.id, false)}>
-                  Reject
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {tab === "runs" && (
-        <div className="admin-list">
-          {runs.length === 0 && <p className="panel">No crawl runs yet.</p>}
-          {runs.map((r) => {
-            const live = (r.status === "running" || r.status === "queued") && !r.end_time;
-            return (
-              <div key={r.id} className={`admin-row ${live ? "admin-row--crawling" : ""}`}>
-                <div className="admin-row__top">
+          {selectedRun ? (
+            <>
+              <div className="admin-row admin-row__top" style={{ alignItems: "center" }}>
+                <div>
                   <div className="font-semibold">
-                    Run #{r.id}
-                    {live && <span className="admin-crawl-pulse"> Live</span>}
+                    Run #{selectedRun.id} · {selectedRun.source_name || sourceNameById[selectedRun.source_id] || `Source ${selectedRun.source_id}`}
                   </div>
-                  <span className={`admin-badge ${r.status === "success" || r.status === "completed" ? "" : "warn"}`}>
-                    {r.status}
-                  </span>
+                  <p className="admin-meta" style={{ margin: "0.35rem 0 0" }}>
+                    {selectedRun.organization ? `${selectedRun.organization} · ` : ""}
+                    {selectedRun.status} · pages {selectedRun.pages_crawled} · docs{" "}
+                    {selectedRun.documents_processed} · changes {selectedRun.changes_detected}
+                    {typeof selectedRun.linked_changes === "number"
+                      ? ` (${selectedRun.linked_changes} linked)`
+                      : ""}{" "}
+                    · errors {selectedRun.error_count}
+                  </p>
+                  <p className="admin-meta" style={{ margin: "0.25rem 0 0" }}>
+                    {selectedRun.start_time} → {selectedRun.end_time || "running…"}
+                    {selectedRun.notes ? ` · ${selectedRun.notes}` : ""}
+                  </p>
                 </div>
-                <div className="admin-meta">
-                  {sourceNameById[r.source_id] || `Source ${r.source_id}`} · pages {r.pages_crawled} · docs{" "}
-                  {r.documents_processed} · changes {r.changes_detected} · errors {r.error_count}
+                <div className="admin-actions">
+                  <button className="btn btn-secondary" type="button" onClick={() => backToRuns()}>
+                    Back to crawls
+                  </button>
                 </div>
-                <div className="admin-meta">
-                  {r.start_time} → {r.end_time || "running…"}
-                </div>
-                {live && (
-                  <div className="admin-crawl-track admin-crawl-track--inline" aria-hidden>
-                    <span className="admin-crawl-bar" />
-                  </div>
-                )}
               </div>
-            );
-          })}
+              <div className="admin-row">
+                <div className="font-semibold">Changes in this crawl ({changes.length})</div>
+                <p className="admin-meta" style={{ margin: "0.35rem 0 0" }}>
+                  Field updates from this run. Undo restores one field at a time.
+                </p>
+              </div>
+              {renderChangeGroups(changesByScheme)}
+            </>
+          ) : (
+            <>
+              <div className="admin-row admin-row__top" style={{ alignItems: "center" }}>
+                <div>
+                  <div className="font-semibold">Crawl review</div>
+                  <p className="admin-meta" style={{ margin: "0.35rem 0 0" }}>
+                    Open a crawl to see what changed, then undo individual fields if needed.
+                  </p>
+                </div>
+              </div>
+              {runs.length === 0 && <p className="panel">No crawl runs yet.</p>}
+              {runs.map((r) => {
+                const live = (r.status === "running" || r.status === "queued") && !r.end_time;
+                const site =
+                  r.source_name || sourceNameById[r.source_id] || `Source ${r.source_id || "?"}`;
+                return (
+                  <button
+                    key={r.id}
+                    type="button"
+                    className={`admin-row ${live ? "admin-row--crawling" : ""}`}
+                    onClick={() => openRun(r)}
+                    style={{
+                      width: "100%",
+                      textAlign: "left",
+                      cursor: "pointer",
+                      appearance: "none",
+                      font: "inherit",
+                      color: "inherit",
+                    }}
+                  >
+                    <div className="admin-row__top">
+                      <div className="font-semibold">
+                        Run #{r.id}
+                        {live && <span className="admin-crawl-pulse"> Live</span>}
+                      </div>
+                      <span
+                        className={`admin-badge ${r.status === "success" || r.status === "completed" ? "" : "warn"}`}
+                      >
+                        {r.status}
+                      </span>
+                    </div>
+                    <div className="admin-meta">
+                      {site}
+                      {r.organization ? ` · ${r.organization}` : ""}
+                    </div>
+                    <div className="admin-meta">
+                      pages {r.pages_crawled} · docs {r.documents_processed} · changes{" "}
+                      {r.changes_detected}
+                      {typeof r.linked_changes === "number" ? ` (${r.linked_changes} linked)` : ""} ·
+                      errors {r.error_count}
+                    </div>
+                    <div className="admin-meta">
+                      {r.start_time} → {r.end_time || "running…"}
+                      {r.notes ? ` · ${r.notes}` : ""}
+                    </div>
+                    {live && (
+                      <div className="admin-crawl-track admin-crawl-track--inline" aria-hidden>
+                        <span className="admin-crawl-bar" />
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
+
+              <div className="admin-row" style={{ marginTop: "1rem" }}>
+                <div className="font-semibold">
+                  Older / unlinked changes ({unlinkedChanges.length})
+                </div>
+                <p className="admin-meta" style={{ margin: "0.35rem 0 0" }}>
+                  Changes recorded before crawl IDs were linked. You can still undo fields here.
+                </p>
+              </div>
+              {renderChangeGroups(unlinkedByScheme)}
+            </>
+          )}
         </div>
       )}
 
@@ -897,8 +1039,9 @@ export default function AdminPage() {
         <div className="admin-list">
           <div className="admin-row admin-row__top" style={{ alignItems: "center" }}>
             <div>
-              <div className="font-semibold">Schemes in database ({schemes.length})</div>
+              <div className="font-semibold">Active unique schemes ({schemes.length})</div>
               <p className="admin-meta" style={{ margin: "0.35rem 0 0" }}>
+                Same set as Explore/Find. Discontinued and title-variant duplicates are hidden here.
                 Remove privacy/FAQ/terms pages that were wrongly saved as schemes.
               </p>
             </div>

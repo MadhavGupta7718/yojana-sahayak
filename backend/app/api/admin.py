@@ -48,17 +48,40 @@ def me(admin: AdminUser = Depends(get_current_admin)):
 
 @router.get("/overview")
 def overview(db: Session = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
+    from app.services.scheme_dedupe import count_active_unique, retire_stale_duplicates
+
+    # Keep Admin totals aligned with Explore/Find by retiring title-variant duplicates
+    retired = retire_stale_duplicates(db)
+    if retired:
+        db.commit()
+
+    active_unique = count_active_unique(db)
+    discontinued = db.query(Scheme).filter(Scheme.status == "discontinued").count()
+    from scraper.change_detection.promote import UNDOABLE_STATUSES, flush_pending_changes
+
+    flushed = flush_pending_changes(db, admin.id)
+    if flushed:
+        db.commit()
+
     return {
-        "total_schemes": db.query(Scheme).count(),
-        "total_partners": db.query(Partner).count(),
+        "total_schemes": active_unique,
+        "discontinued_schemes": discontinued,
+        "total_partners": db.query(Partner)
+        .filter(Partner.status.in_(["active", "authorized"]))
+        .count(),
         "government_sources": db.query(GovernmentSource).count(),
         "enabled_sources": db.query(GovernmentSource).filter(GovernmentSource.enabled.is_(True)).count(),
         "successful_runs": db.query(ScrapingRun).filter(ScrapingRun.status == "success").count(),
         "failed_runs": db.query(ScrapingRun).filter(ScrapingRun.status.in_(["failed", "ERROR"])).count(),
-        "pending_changes": db.query(DataChange)
-        .filter(DataChange.status.in_(["pending_review", "detected"]))
+        "undoable_changes": db.query(DataChange)
+        .filter(DataChange.status.in_(list(UNDOABLE_STATUSES)))
         .count(),
-        "stale_schemes": db.query(Scheme).filter(Scheme.last_verified.is_(None)).count(),
+        "pending_changes": db.query(DataChange)
+        .filter(DataChange.status.in_(["pending_review", "detected", "conflict"]))
+        .count(),
+        "stale_schemes": db.query(Scheme)
+        .filter(Scheme.status.in_(["active", "unavailable"]), Scheme.last_verified.is_(None))
+        .count(),
     }
 
 
@@ -544,35 +567,78 @@ def clear_stuck_crawls(
         "redis_queue_cleared": bool(redis_cleared),
     }
 
-@router.get("/changes")
-def list_changes(
-    status: str | None = None,
-    db: Session = Depends(get_db),
-    admin: AdminUser = Depends(get_current_admin),
-):
-    q = db.query(DataChange).order_by(DataChange.detected_at.desc())
-    if status:
-        q = q.filter(DataChange.status == status)
-    rows = q.limit(200).all()
+def _serialize_changes(db: Session, rows: list[DataChange]) -> list[dict]:
+    from scraper.change_detection.promote import UNDOABLE_STATUSES
+
+    scheme_ids = {c.entity_id for c in rows if c.entity_type == "scheme" and c.entity_id}
+    partner_ids = {c.entity_id for c in rows if c.entity_type == "partner" and c.entity_id}
+    scheme_names = {
+        s.id: s.name for s in db.query(Scheme).filter(Scheme.id.in_(scheme_ids)).all()
+    } if scheme_ids else {}
+    partner_names = {
+        p.id: p.name for p in db.query(Partner).filter(Partner.id.in_(partner_ids)).all()
+    } if partner_ids else {}
+
     return [
         {
             "id": c.id,
             "entity_type": c.entity_type,
             "entity_id": c.entity_id,
             "entity_key": c.entity_key,
+            "entity_name": (
+                scheme_names.get(c.entity_id)
+                if c.entity_type == "scheme"
+                else partner_names.get(c.entity_id)
+            )
+            or c.entity_key
+            or f"{c.entity_type} #{c.entity_id or '?'}",
             "field_name": c.field_name,
             "old_value": c.old_value,
             "new_value": c.new_value,
             "source_id": c.source_id,
             "source_url": c.source_url,
+            "scraping_run_id": c.scraping_run_id,
             "detected_at": c.detected_at,
             "status": c.status,
             "is_sensitive": c.is_sensitive,
             "is_conflict": c.is_conflict,
             "notes": c.notes,
+            "can_undo": c.status in UNDOABLE_STATUSES and c.field_name != "created",
         }
         for c in rows
     ]
+
+
+@router.get("/changes")
+def list_changes(
+    status: str | None = None,
+    undoable: bool = False,
+    unlinked: bool = False,
+    run_id: int | None = None,
+    db: Session = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin),
+):
+    from scraper.change_detection.promote import UNDOABLE_STATUSES, flush_pending_changes
+
+    # Migrate any leftover pending rows into applied/undoable audit entries
+    if undoable or run_id is not None:
+        flushed = flush_pending_changes(db, admin.id)
+        if flushed:
+            db.commit()
+
+    q = db.query(DataChange).order_by(DataChange.detected_at.desc())
+    if run_id is not None:
+        q = q.filter(DataChange.scraping_run_id == run_id)
+    elif unlinked:
+        q = q.filter(DataChange.scraping_run_id.is_(None))
+        if undoable:
+            q = q.filter(DataChange.status.in_(list(UNDOABLE_STATUSES)))
+    elif undoable:
+        q = q.filter(DataChange.status.in_(list(UNDOABLE_STATUSES)))
+    elif status:
+        q = q.filter(DataChange.status == status)
+    rows = q.limit(500).all()
+    return _serialize_changes(db, rows)
 
 
 @router.post("/changes/approve-all")
@@ -580,20 +646,10 @@ def approve_all_changes(
     db: Session = Depends(get_db),
     admin: AdminUser = Depends(require_roles("superadmin", "reviewer")),
 ):
-    """Approve every change currently waiting for review."""
-    from scraper.change_detection.promote import apply_change
+    """Flush leftover pending changes into auto-applied (legacy). Prefer Undo in Change Review."""
+    from scraper.change_detection.promote import flush_pending_changes
 
-    pending = (
-        db.query(DataChange)
-        .filter(DataChange.status.in_(["pending_review", "detected"]))
-        .order_by(DataChange.id.asc())
-        .all()
-    )
-    approved_ids: list[int] = []
-    for change in pending:
-        apply_change(db, change, True, admin.id)
-        approved_ids.append(change.id)
-
+    approved_ids = flush_pending_changes(db, admin.id)
     write_audit(
         db,
         admin,
@@ -607,9 +663,9 @@ def approve_all_changes(
         "approved": len(approved_ids),
         "ids": approved_ids,
         "message": (
-            f"Approved {len(approved_ids)} change(s)."
+            f"Applied {len(approved_ids)} leftover change(s)."
             if approved_ids
-            else "No pending changes to approve."
+            else "No pending changes left to apply."
         ),
     }
 
@@ -641,24 +697,110 @@ def decide_change(
     return {"ok": True, "status": change.status}
 
 
+@router.post("/changes/{change_id}/undo")
+def undo_data_change(
+    change_id: int,
+    db: Session = Depends(get_db),
+    admin: AdminUser = Depends(require_roles("superadmin", "reviewer")),
+):
+    """Restore the previous field value for one auto-applied change."""
+    from scraper.change_detection.promote import undo_change
+
+    change = db.query(DataChange).filter(DataChange.id == change_id).first()
+    if not change:
+        raise HTTPException(404, "Change not found")
+    try:
+        undo_change(db, change, admin.id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    write_audit(
+        db,
+        admin,
+        "undo_change",
+        "data_change",
+        change_id,
+        {
+            "field_name": change.field_name,
+            "entity_type": change.entity_type,
+            "entity_id": change.entity_id,
+            "restored": change.old_value,
+        },
+    )
+    db.commit()
+    return {
+        "ok": True,
+        "status": change.status,
+        "field_name": change.field_name,
+        "restored_value": change.old_value,
+        "message": f"Undid {change.field_name}; previous value restored.",
+    }
+
+
 @router.get("/runs")
 def list_runs(db: Session = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
     runs = db.query(ScrapingRun).order_by(ScrapingRun.start_time.desc()).limit(100).all()
+    source_ids = {r.source_id for r in runs if r.source_id}
+    sources = {
+        s.id: s
+        for s in db.query(GovernmentSource).filter(GovernmentSource.id.in_(source_ids)).all()
+    } if source_ids else {}
+    run_ids = [r.id for r in runs]
+    change_counts: dict[int, int] = {}
+    if run_ids:
+        rows = (
+            db.query(DataChange.scraping_run_id, func.count(DataChange.id))
+            .filter(DataChange.scraping_run_id.in_(run_ids))
+            .group_by(DataChange.scraping_run_id)
+            .all()
+        )
+        change_counts = {int(rid): int(cnt) for rid, cnt in rows if rid is not None}
+
     return [
         {
             "id": r.id,
             "source_id": r.source_id,
+            "source_name": (sources[r.source_id].source_name if r.source_id in sources else None),
+            "organization": (sources[r.source_id].organization if r.source_id in sources else None),
             "start_time": r.start_time,
             "end_time": r.end_time,
             "status": r.status,
             "pages_crawled": r.pages_crawled,
             "documents_processed": r.documents_processed,
             "changes_detected": r.changes_detected,
+            "linked_changes": change_counts.get(r.id, 0),
             "error_count": r.error_count,
             "notes": r.notes,
         }
         for r in runs
     ]
+
+
+@router.get("/runs/{run_id}")
+def get_run(
+    run_id: int,
+    db: Session = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin),
+):
+    r = db.query(ScrapingRun).filter(ScrapingRun.id == run_id).first()
+    if not r:
+        raise HTTPException(404, "Crawl run not found")
+    source = db.query(GovernmentSource).filter(GovernmentSource.id == r.source_id).first() if r.source_id else None
+    linked = db.query(DataChange).filter(DataChange.scraping_run_id == r.id).count()
+    return {
+        "id": r.id,
+        "source_id": r.source_id,
+        "source_name": source.source_name if source else None,
+        "organization": source.organization if source else None,
+        "start_time": r.start_time,
+        "end_time": r.end_time,
+        "status": r.status,
+        "pages_crawled": r.pages_crawled,
+        "documents_processed": r.documents_processed,
+        "changes_detected": r.changes_detected,
+        "linked_changes": linked,
+        "error_count": r.error_count,
+        "notes": r.notes,
+    }
 
 
 @router.get("/errors")
@@ -725,8 +867,21 @@ def purge_non_schemes(
 
 
 @router.get("/schemes")
-def admin_schemes(db: Session = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
-    schemes = db.query(Scheme).order_by(Scheme.id).all()
+def admin_schemes(
+    include_discontinued: bool = False,
+    db: Session = Depends(get_db),
+    admin: AdminUser = Depends(get_current_admin),
+):
+    from app.services.scheme_dedupe import active_unique_schemes, retire_stale_duplicates
+
+    retired = retire_stale_duplicates(db)
+    if retired:
+        db.commit()
+
+    if include_discontinued:
+        schemes = db.query(Scheme).order_by(Scheme.id).all()
+    else:
+        schemes = active_unique_schemes(db)
     return [
         {
             "id": s.id,
@@ -738,6 +893,7 @@ def admin_schemes(db: Session = Depends(get_db), admin: AdminUser = Depends(get_
             "interest_rate": s.interest_rate,
             "max_loan": s.max_loan,
             "max_income": s.max_income,
+            "purpose": s.purpose,
         }
         for s in schemes
     ]
@@ -771,7 +927,12 @@ def scheme_versions(
 
 @router.get("/partners")
 def admin_partners(db: Session = Depends(get_db), admin: AdminUser = Depends(get_current_admin)):
-    partners = db.query(Partner).order_by(Partner.id).all()
+    partners = (
+        db.query(Partner)
+        .filter(Partner.status.in_(["active", "authorized"]))
+        .order_by(Partner.id)
+        .all()
+    )
     return [
         {
             "id": p.id,

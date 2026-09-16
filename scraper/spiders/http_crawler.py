@@ -330,6 +330,7 @@ class SourceCrawler:
             staging = StagingRecord(
                 source_id=self.source.id,
                 raw_document_id=raw.id,
+                scraping_run_id=self.run.id,
                 entity_type="scheme",
                 entity_key=payload.get("canonical_key") or canonical_key(payload.get("name") or url),
                 payload=payload,
@@ -402,6 +403,7 @@ class SourceCrawler:
                         staging = StagingRecord(
                             source_id=self.source.id,
                             raw_document_id=raw.id,
+                            scraping_run_id=self.run.id,
                             entity_type="scheme",
                             entity_key=payload.get("canonical_key") or canonical_key(payload.get("name") or url),
                             payload=payload,
@@ -419,6 +421,7 @@ class SourceCrawler:
                             pst = StagingRecord(
                                 source_id=self.source.id,
                                 raw_document_id=raw.id,
+                                scraping_run_id=self.run.id,
                                 entity_type="partner",
                                 entity_key=partner["canonical_key"],
                                 payload=partner,
@@ -457,6 +460,7 @@ class SourceCrawler:
                     staging = StagingRecord(
                         source_id=self.source.id,
                         raw_document_id=raw.id,
+                        scraping_run_id=self.run.id,
                         entity_type="partner",
                         entity_key=partner["canonical_key"],
                         payload=partner,

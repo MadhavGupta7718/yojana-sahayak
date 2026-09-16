@@ -1,12 +1,17 @@
 import { cookies } from "next/headers";
 import { getMessages, t, type Locale } from "@/lib/i18n";
+import SchemesClient from "@/components/SchemesClient";
 
 async function fetchSchemes() {
   const base = process.env.BACKEND_INTERNAL_URL || process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
   try {
-    const res = await fetch(`${base}/api/v1/schemes`, { cache: "no-store" });
+    const res = await fetch(`${base}/api/v1/schemes`, {
+      cache: "no-store",
+      next: { revalidate: 0 },
+    });
     if (!res.ok) return [];
-    return res.json();
+    const data = await res.json();
+    return Array.isArray(data) ? data : data.schemes || [];
   } catch {
     return [];
   }
@@ -22,7 +27,7 @@ export default async function SchemesPage() {
     <div className="ys-page">
       <header className="ys-pagehead">
         <div className="ys-wrap">
-          <p className="ys-kicker">Catalogue</p>
+          <p className="ys-kicker">{locale === "hi" ? "सूची" : "Catalogue"}</p>
           <h1 className="ys-h1">{t(messages, "exploreSchemes")}</h1>
           <p className="ys-sub">
             {locale === "hi"
@@ -32,32 +37,30 @@ export default async function SchemesPage() {
         </div>
       </header>
 
-      <div className="ys-wrap ys-schemes">
-        {schemes.length === 0 && <p className="ys-empty">{t(messages, "emptySchemes")}</p>}
-        {schemes.map((s: any) => (
-          <article key={s.id} className="ys-scheme">
-            <h2>{s.name}</h2>
-            <p>{s.description?.slice(0, 280) || t(messages, "notAvailable")}</p>
-            <div className="ys-scheme__meta">
-              <span>
-                Max loan:{" "}
-                {s.max_loan != null ? `₹${Number(s.max_loan).toLocaleString("en-IN")}` : t(messages, "notAvailable")}
-              </span>
-              <span>
-                Interest: {s.interest_rate != null ? `${s.interest_rate}%` : t(messages, "notAvailable")}
-              </span>
-              <span>
-                {t(messages, "freshness")}: {s.freshness}
-              </span>
-            </div>
-            {s.source_url && (
-              <a className="ys-link" href={s.source_url} target="_blank" rel="noreferrer">
-                {t(messages, "officialSource")} →
-              </a>
-            )}
-          </article>
-        ))}
-      </div>
+      <SchemesClient
+        initialSchemes={schemes}
+        locale={locale}
+        labels={{
+          empty: t(messages, "emptySchemes"),
+          notAvailable: t(messages, "notAvailable"),
+          freshness: t(messages, "freshness"),
+          officialSource: t(messages, "officialSource"),
+          searchPlaceholder:
+            locale === "hi" ? "योजना नाम / उद्देश्य खोजें…" : "Search scheme name / purpose…",
+          showing:
+            locale === "hi"
+              ? "दिखा रहे हैं {shown} / कुल {total} योजनाएँ"
+              : "Showing {shown} of {total} schemes",
+          loadError:
+            locale === "hi"
+              ? "योजनाएँ लोड नहीं हो सकीं। पुनः प्रयास करें।"
+              : "Could not load schemes. Please retry.",
+          retry: locale === "hi" ? "फिर से लोड करें" : "Reload",
+          maxLoan: locale === "hi" ? "अधिकतम ऋण" : "Max loan",
+          interest: locale === "hi" ? "ब्याज" : "Interest",
+          allPurposes: locale === "hi" ? "सभी उद्देश्य" : "All purposes",
+        }}
+      />
     </div>
   );
 }
